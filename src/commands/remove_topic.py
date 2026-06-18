@@ -16,7 +16,7 @@ from src.store.profile_store import ProfileStore
 
 class RemoveTopicCommand(Command):
     name = "remove_topic"
-    description = "Rimuovi un topic, o keyword da un topic. Uso: /remove_topic Nome[: kw1, kw2]"
+    description = "Remove a topic, or keywords from a topic. Usage: /remove_topic Name[: kw1, kw2]"
 
     def handle(self, args: str, store: ProfileStore) -> str:
         # Split on the FIRST colon: left -> topic name (may contain spaces),
@@ -30,16 +30,16 @@ class RemoveTopicCommand(Command):
         keywords = [kw.strip() for kw in keywords_part.split(",") if kw.strip()]
 
         if not name:
-            return "Uso: /remove_topic Nome del topic[: keyword1, keyword2]"
+            return "Usage: /remove_topic Topic name[: keyword1, keyword2]"
 
         outcome, removed = store.remove_topic(name, keywords)
 
         if outcome == "not_found":
-            return f"Topic «{name}» non è presente nel tuo profilo."
+            return f"Topic «{name}» is not in your profile."
         if outcome == "topic_removed":
-            return f"Topic «{name}» rimosso."
+            return f"Topic «{name}» removed."
         # outcome == "keywords_removed"
         if removed:
-            return format_added(f"Keyword rimosse dal topic «{name}»", removed)
+            return format_added(f"Keywords removed from topic «{name}»", removed)
         # None of the submitted keywords were in the topic.
         return format_not_present(f"Topic «{name}»", present_items(keywords, []))

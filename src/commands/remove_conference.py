@@ -16,7 +16,7 @@ from src.store.profile_store import ProfileStore
 
 class RemoveConferenceCommand(Command):
     name: str = "remove_conference"
-    description: str = "Rimuovi conferenze dal profilo (separate da virgola)"
+    description: str = "Remove conferences from your profile (comma-separated)"
 
     def handle(self, args: str, store: ProfileStore) -> str:
         # Split ONLY on commas: a conference name may contain spaces (e.g. "ICLR Workshop").
@@ -24,14 +24,14 @@ class RemoveConferenceCommand(Command):
         names = [name for name in names if name]
 
         if not names:
-            return "Uso: /remove_conference NeurIPS[, ICML, ...]"
+            return "Usage: /remove_conference NeurIPS[, ICML, ...]"
 
         removed = store.remove_conferences(names)
         notfound = present_items(names, removed)
 
         lines: list[str] = []
         if removed:
-            lines.append(format_added("Conferenze rimosse", removed))
+            lines.append(format_added("Conferences removed", removed))
         if notfound:
-            lines.append(format_not_present("Conferenze", notfound))
+            lines.append(format_not_present("Conferences", notfound))
         return "\n".join(lines)

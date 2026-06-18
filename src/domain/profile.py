@@ -30,7 +30,8 @@ class UserProfile:
     keywords: tuple[str, ...] = ()
     author_ids: tuple[str, ...] = ()      # S2 stable ids (resolved in Phase 2)
     author_names: tuple[str, ...] = ()    # display-name fallback (arXiv has no ids)
-    seed_arxiv_ids: tuple[str, ...] = ()  # used to build the profile vector (Phase 2)
+    seed_arxiv_ids: tuple[str, ...] = ()  # arXiv seeds for the profile vector (Phase 2)
+    seed_texts: tuple[str, ...] = ()      # "title\n\nabstract" of NON-arXiv read papers
     conferences: tuple[str, ...] = ()     # favorite venues (stored now; scored later)
     weights: ScoreWeights = field(default_factory=ScoreWeights)
     # embedding: np.ndarray | None = None   # added in Phase 2

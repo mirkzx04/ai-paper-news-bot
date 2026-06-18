@@ -22,11 +22,13 @@ from src.commands.remove_author import RemoveAuthorCommand
 from src.commands.remove_conference import RemoveConferenceCommand
 from src.commands.remove_keywords import RemoveKeywordsCommand
 from src.commands.remove_topic import RemoveTopicCommand
+from src.commands.report import ReportCommand
 from src.config import apply_profile_overlay, load_config
 from src.embedding.profile_vector import load_or_build
 from src.embedding.specter import SpecterEmbedder
 from src.enrich.semantic_scholar import resolve_author_ids
 from src.env import load_env
+from src.flow.profile_flow import ProfileFlow
 from src.notify.base import Notifier
 from src.notify.console_notifier import ConsoleNotifier
 from src.notify.telegram_notifier import TelegramNotifier
@@ -39,6 +41,7 @@ from src.scoring.keyword_scorer import KeywordScorer
 from src.sources.arxiv_source import ArxivSource
 from src.store.profile_store import ProfileStore
 from src.store.sqlite_store import SqliteStore
+from src.telegram_api import set_my_commands
 from src.telegram_poller import TelegramPoller
 
 logger = logging.getLogger("main")
@@ -55,6 +58,7 @@ def build_commands() -> list:
         RemoveKeywordsCommand(),
         RemoveTopicCommand(),
         RemoveConferenceCommand(),
+        ReportCommand(),
     ]
 
 
@@ -85,7 +89,8 @@ def build_pipeline(cfg, store, notifier,
     # are seed papers and the cached vector is stale. With no seeds the profile
     # vector is None and EmbeddingScorer is a no-op (the model never loads).
     embedder = SpecterEmbedder()
-    seed_vectors = load_or_build(list(cfg.profile.seed_arxiv_ids), embedder, profile_vector_path)
+    seed_vectors = load_or_build(list(cfg.profile.seed_arxiv_ids), embedder, profile_vector_path,
+                                 seed_texts=list(cfg.profile.seed_texts))
     if seed_vectors is None:
         logger.info("no seed papers -> embedding scorer is a no-op")
     scorer = CombinedScorer({
@@ -134,6 +139,8 @@ def main() -> None:
     parser.add_argument("--notifier", choices=["console", "telegram"], default="console")
     parser.add_argument("--poll-commands", action="store_true",
                         help="process incoming Telegram commands (/add_author, ...) and exit")
+    parser.add_argument("--register-menu", action="store_true",
+                        help="register the bot's slash-command menu on Telegram and exit")
     parser.add_argument("--lookback-days", type=int, default=None,
                         help="override the source lookback window")
     parser.add_argument("--dry-run", action="store_true",
@@ -147,6 +154,21 @@ def main() -> None:
     )
 
     load_env()
+
+    # Register the Telegram slash-command menu and exit.
+    if args.register_menu:
+        token = os.environ.get("TELEGRAM_BOT_TOKEN")
+        if not token:
+            parser.error("--register-menu richiede TELEGRAM_BOT_TOKEN.")
+        menu = [{"command": "creare_profile",
+                 "description": "Set up your profile: read papers, authors, topics"}]
+        menu += [{"command": c.name, "description": c.description[:256]} for c in build_commands()]
+        # Placeholder copy (to be polished later): /clear wipes recent bot messages.
+        menu += [{"command": "clear", "description": "Clear recent bot messages"}]
+        resp = set_my_commands(token, menu)
+        print(f"setMyCommands: {resp.status_code} {resp.text[:120]}")
+        return
+
     cfg = load_config(args.config)
     os.makedirs(os.path.dirname(args.db) or ".", exist_ok=True)
     store = SqliteStore(args.db)
@@ -158,7 +180,8 @@ def main() -> None:
         if not token:
             parser.error("--poll-commands richiede TELEGRAM_BOT_TOKEN (in .env o nell'ambiente).")
         dispatcher = CommandDispatcher(build_commands(), profile_store)
-        poller = TelegramPoller(token, dispatcher, store)
+        flow = ProfileFlow(store, profile_store)
+        poller = TelegramPoller(token, dispatcher, store, flow=flow)
         try:
             sent = poller.poll_once()
             print(f"comandi processati, risposte inviate: {sent}")

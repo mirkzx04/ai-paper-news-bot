@@ -69,52 +69,56 @@ def fetch_arxiv_summaries(arxiv_ids: list[str], timeout: int = 30) -> list[str]:
     return summaries
 
 
-def build_profile_vector(seed_arxiv_ids: list[str], embedder) -> "np.ndarray | None":
+def build_profile_vector(seed_arxiv_ids: list[str], embedder,
+                         seed_texts: list[str] | None = None) -> "np.ndarray | None":
     """Embed the seed papers into a matrix of L2-normalized row vectors.
 
-    Returns ``None`` when there are no seed ids or when the arXiv fetch yields no
-    summaries. Otherwise returns a ``(n_seeds, dim)`` ``float32`` array with one
-    L2-normalized row per seed (kept separate, not averaged — see module docstring).
+    Seeds come from two sources, both embedded as ``"title\\n\\nabstract"`` text:
+    ``seed_arxiv_ids`` (fetched from arXiv) and ``seed_texts`` (raw strings for
+    papers NOT on arXiv, e.g. transformer-circuits.pub). Returns ``None`` when
+    there is nothing to embed; otherwise a ``(n_seeds, dim)`` ``float32`` array
+    with one L2-normalized row per seed (kept separate, not averaged).
     """
-    if not seed_arxiv_ids:
+    seed_texts = list(seed_texts or [])
+    summaries = fetch_arxiv_summaries(seed_arxiv_ids) if seed_arxiv_ids else []
+    all_texts = summaries + seed_texts
+    if not all_texts:
         return None
 
-    summaries = fetch_arxiv_summaries(seed_arxiv_ids)
-    if not summaries:
-        return None
-
-    embeddings = np.asarray(embedder.encode(summaries), dtype=np.float32)
+    embeddings = np.asarray(embedder.encode(all_texts), dtype=np.float32)
     # Ensure rows are unit-norm (the embedder normally normalizes already).
     return l2_normalize(embeddings).astype(np.float32)
 
 
 def load_or_build(
-    seed_arxiv_ids: list[str], embedder, path: str
+    seed_arxiv_ids: list[str], embedder, path: str, seed_texts: list[str] | None = None
 ) -> "np.ndarray | None":
     """Return the cached profile vector, rebuilding it only when the seeds change.
 
     The cache at ``path`` is JSON of the form
-    ``{"seed_ids": [...], "vectors": [[...], ...]}``. If it exists and its
-    ``seed_ids`` *set* matches the requested set, the stored matrix is returned
-    directly (no embedding, no network). Otherwise it is rebuilt via
-    :func:`build_profile_vector`; on success the cache is (re)written — creating
-    its parent directory if needed — and the matrix returned. If the rebuild
-    yields ``None`` the cache is left untouched. An old/incompatible cache (e.g.
-    a previous single-vector format) is treated as unreadable and rebuilt.
+    ``{"seed_ids": [...], "seed_texts": [...], "vectors": [[...], ...]}``. If it
+    exists and BOTH the ``seed_ids`` set and the ``seed_texts`` list match the
+    request, the stored matrix is returned directly (no embedding, no network).
+    Otherwise it is rebuilt via :func:`build_profile_vector`; on success the cache
+    is (re)written — creating its parent directory if needed. If the rebuild
+    yields ``None`` the cache is left untouched. An old/incompatible cache is
+    treated as unreadable and rebuilt.
     """
+    seed_texts = list(seed_texts or [])
     if os.path.exists(path):
         try:
             with open(path, "r", encoding="utf-8") as fh:
                 cached = json.load(fh)
             cached_ids = cached["seed_ids"]
+            cached_texts = cached.get("seed_texts", [])
             vectors = cached["vectors"]
         except (OSError, ValueError, KeyError, TypeError) as exc:
             logger.warning("Profile-vector cache at %s unreadable, rebuilding: %s", path, exc)
         else:
-            if set(cached_ids) == set(seed_arxiv_ids):
+            if set(cached_ids) == set(seed_arxiv_ids) and cached_texts == seed_texts:
                 return np.array(vectors, dtype=np.float32)
 
-    vectors = build_profile_vector(seed_arxiv_ids, embedder)
+    vectors = build_profile_vector(seed_arxiv_ids, embedder, seed_texts)
     if vectors is None:
         return None
 
@@ -122,5 +126,6 @@ def load_or_build(
     if parent:
         os.makedirs(parent, exist_ok=True)
     with open(path, "w", encoding="utf-8") as fh:
-        json.dump({"seed_ids": list(seed_arxiv_ids), "vectors": vectors.tolist()}, fh)
+        json.dump({"seed_ids": list(seed_arxiv_ids), "seed_texts": seed_texts,
+                   "vectors": vectors.tolist()}, fh)
     return vectors

@@ -79,8 +79,28 @@ authors:
   - Barret Zoph
   - Jason Wei
 
-# Paper-seed per costruire il profile-vector (Phase 2). arXiv id, es. "2401.12345".
-seed_arxiv_ids: []
+# Paper-seed per il profile-vector (Phase 2) — popolati dai tuoi paper letti (vault Obsidian AI-KB).
+seed_arxiv_ids:
+  - "2101.03961"   # Switch Transformers (MoE)
+  - "2202.08906"   # ST-MoE
+  - "2505.18586"   # Guiding the Experts: Semantic Priors for MoE Routing
+  - "2603.06746"   # ButterflyViT: Expert Compression for Edge ViT
+  - "2404.14082"   # Mechanistic Interpretability for AI Safety — A Review
+  - "2508.00901"   # Provable Knowledge Acquisition in One-Layer Transformers
+  - "2506.14245"   # RLVR Implicitly Incentivizes Correct Reasoning
+  - "2601.19928"   # Towards a Mechanistic Understanding of Large Reasoning Models
+
+# Paper letti NON su arXiv: testo "titolo\n\nabstract" embeddato direttamente.
+seed_texts:
+  - |
+    A Mathematical Framework for Transformer Circuits
+
+    A mathematical framework for reverse-engineering transformer internals.
+    Attention heads are independent, additive operations that read from and
+    write to a residual stream as a communication channel; the framework
+    analyzes query-key and output-value circuits, identifies induction heads
+    as a mechanism for in-context learning, and shows how attention heads
+    compose across layers to implement more sophisticated algorithms.
 
 # Contributo assoluto di ogni segnale:  total = min(1, Σ wᵢ·sᵢ)
 weights:

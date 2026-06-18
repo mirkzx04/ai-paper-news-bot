@@ -18,21 +18,21 @@ from src.store.profile_store import ProfileStore
 
 class RemoveAuthorCommand(Command):
     name = "remove_author"
-    description = "Rimuovi autori dal profilo (separati da virgola)"
+    description = "Remove authors from your profile (comma-separated)"
 
     def handle(self, args: str, store: ProfileStore) -> str:
         # Split on commas only (names may contain spaces); drop empty entries.
         names = [part.strip() for part in args.split(",")]
         names = [name for name in names if name]
         if not names:
-            return "Uso: /remove_author Nome Autore[, Altro Autore]"
+            return "Usage: /remove_author Author Name[, Another Author]"
 
         removed = store.remove_authors(names)
         notfound = present_items(names, removed)
 
         lines: list[str] = []
         if removed:
-            lines.append(format_added("Autori rimossi", removed))
+            lines.append(format_added("Authors removed", removed))
         if notfound:
-            lines.append(format_not_present("Autori", notfound))
+            lines.append(format_not_present("Authors", notfound))
         return "\n".join(lines)

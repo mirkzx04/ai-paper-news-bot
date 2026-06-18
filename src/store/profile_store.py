@@ -22,7 +22,8 @@ class ProfileStore:
 
     def __init__(self, path: str = "data/profile_overlay.json") -> None:
         self.path = path
-        self._data: dict = {"authors": [], "keywords": [], "topics": {}, "conferences": []}
+        self._data: dict = {"authors": [], "keywords": [], "topics": {},
+                            "conferences": [], "seeds": []}
         self._load()
 
     # ---- persistence -------------------------------------------------------
@@ -54,6 +55,10 @@ class ProfileStore:
         return list(self._data["conferences"])
 
     @property
+    def seeds(self) -> list[str]:
+        return list(self._data["seeds"])
+
+    @property
     def topics(self) -> dict[str, list[str]]:
         return {name: list(kws) for name, kws in self._data["topics"].items()}
 
@@ -66,6 +71,9 @@ class ProfileStore:
 
     def add_conferences(self, names: list[str]) -> list[str]:
         return self._add_to_list("conferences", names)
+
+    def add_seed_ids(self, arxiv_ids: list[str]) -> list[str]:
+        return self._add_to_list("seeds", arxiv_ids)
 
     def add_topic(self, name: str, keywords: list[str]) -> tuple[bool, list[str]]:
         """Create/extend a topic. Returns (topic_was_created, newly_added_keywords)."""

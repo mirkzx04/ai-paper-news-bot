@@ -15,7 +15,7 @@ from src.store.profile_store import ProfileStore
 
 class RemoveKeywordsCommand(Command):
     name = "remove_keywords"
-    description = "Rimuovi keyword dal profilo (separate da virgola)"
+    description = "Remove keywords from your profile (comma-separated)"
 
     def handle(self, args: str, store: ProfileStore) -> str:
         # Split only on commas; phrases like "sparse autoencoder" stay intact.
@@ -23,7 +23,7 @@ class RemoveKeywordsCommand(Command):
         keywords = [kw for kw in keywords if kw]
 
         if not keywords:
-            return "Uso: /remove_keywords keyword1, keyword2, ..."
+            return "Usage: /remove_keywords keyword1, keyword2, ..."
 
         removed = store.remove_keywords(keywords)
         # Submitted items not actually removed are the ones absent from the profile.
@@ -31,7 +31,7 @@ class RemoveKeywordsCommand(Command):
 
         lines: list[str] = []
         if removed:
-            lines.append(format_added("Keyword rimosse", removed))
+            lines.append(format_added("Keywords removed", removed))
         if notfound:
-            lines.append(format_not_present("Keyword", notfound))
+            lines.append(format_not_present("Keywords", notfound))
         return "\n".join(lines)

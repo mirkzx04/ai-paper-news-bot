@@ -15,7 +15,7 @@ from src.store.profile_store import ProfileStore
 
 class AddTopicCommand(Command):
     name = "add_topic"
-    description = "Aggiungi/estendi un topic di ricerca. Uso: /add_topic Nome: kw1, kw2"
+    description = "Add or extend a research topic. Usage: /add_topic Name: kw1, kw2"
 
     def handle(self, args: str, store: ProfileStore) -> str:
         # Split on the FIRST colon: left -> topic name (may contain spaces),
@@ -29,18 +29,18 @@ class AddTopicCommand(Command):
         keywords = [kw.strip() for kw in keywords_part.split(",") if kw.strip()]
 
         if not name:
-            return "Uso: /add_topic Nome del topic: keyword1, keyword2"
+            return "Usage: /add_topic Topic name: keyword1, keyword2"
 
         created, added = store.add_topic(name, keywords)
 
         # A topic has two axes (the topic itself + its keywords), so the wording
         # is adapted but reuses the same two formatters as the other commands.
         if created and added:
-            return format_added(f"Nuovo topic «{name}» con keyword", added)
+            return format_added(f"New topic «{name}» with keywords", added)
         if created:
-            return f"Nuovo topic «{name}» aggiunto."
+            return f"New topic «{name}» added."
         if added:
-            return format_added(f"Keyword aggiunte al topic «{name}»", added)
+            return format_added(f"Keywords added to topic «{name}»", added)
         if keywords:
             return format_already_present(f"Topic «{name}»", present_items(keywords, []))
-        return f"Topic «{name}» è già presente nel tuo profilo."
+        return f"Topic «{name}» is already in your profile."

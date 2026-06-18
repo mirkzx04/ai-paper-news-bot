@@ -34,6 +34,7 @@ def load_config(path: str) -> AppConfig:
         keywords=tuple(raw.get("keywords", []) or ()),
         author_names=tuple(raw.get("authors", []) or ()),
         seed_arxiv_ids=tuple(raw.get("seed_arxiv_ids", []) or ()),
+        seed_texts=tuple(raw.get("seed_texts", []) or ()),
         conferences=tuple(raw.get("conferences", []) or ()),
         weights=weights,
     )
@@ -62,6 +63,7 @@ def apply_profile_overlay(cfg: AppConfig, store: ProfileStore) -> AppConfig:
         keywords=_union(profile.keywords, store.keywords),
         author_names=_union(profile.author_names, store.authors),
         conferences=_union(profile.conferences, store.conferences),
+        seed_arxiv_ids=_union(profile.seed_arxiv_ids, store.seeds),
     )
 
     topics = {name: list(kws) for name, kws in cfg.topics.items()}

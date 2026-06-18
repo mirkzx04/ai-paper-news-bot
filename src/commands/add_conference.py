@@ -15,7 +15,7 @@ from src.store.profile_store import ProfileStore
 
 class AddConferenceCommand(Command):
     name: str = "add_conference"
-    description: str = "Aggiungi conferenze preferite (separate da virgola)"
+    description: str = "Add favorite conferences (comma-separated)"
 
     def handle(self, args: str, store: ProfileStore) -> str:
         # Split ONLY on commas: a conference name may contain spaces (e.g. "ICLR Workshop").
@@ -23,14 +23,14 @@ class AddConferenceCommand(Command):
         names = [name for name in names if name]
 
         if not names:
-            return "Uso: /add_conference NeurIPS[, ICML, ...]"
+            return "Usage: /add_conference NeurIPS[, ICML, ...]"
 
         added = store.add_conferences(names)
         present = present_items(names, added)
 
         lines: list[str] = []
         if added:
-            lines.append(format_added("Conferenze aggiunte", added))
+            lines.append(format_added("Conferences added", added))
         if present:
-            lines.append(format_already_present("Conferenze", present))
+            lines.append(format_already_present("Conferences", present))
         return "\n".join(lines)

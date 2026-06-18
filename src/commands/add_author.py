@@ -17,21 +17,21 @@ from src.store.profile_store import ProfileStore
 
 class AddAuthorCommand(Command):
     name = "add_author"
-    description = "Aggiungi autori preferiti (separati da virgola)"
+    description = "Add favorite authors (comma-separated)"
 
     def handle(self, args: str, store: ProfileStore) -> str:
         # Split on commas only (names may contain spaces); drop empty entries.
         names = [part.strip() for part in args.split(",")]
         names = [name for name in names if name]
         if not names:
-            return "Uso: /add_author Nome Autore[, Altro Autore]"
+            return "Usage: /add_author Author Name[, Another Author]"
 
         added = store.add_authors(names)
         present = present_items(names, added)
 
         lines: list[str] = []
         if added:
-            lines.append(format_added("Autori aggiunti", added))
+            lines.append(format_added("Authors added", added))
         if present:
-            lines.append(format_already_present("Autori", present))
+            lines.append(format_already_present("Authors", present))
         return "\n".join(lines)

@@ -15,7 +15,7 @@ from src.store.profile_store import ProfileStore
 
 class AddKeywordsCommand(Command):
     name = "add_keywords"
-    description = "Aggiungi keyword di interesse (separate da virgola)"
+    description = "Add keywords you're interested in (comma-separated)"
 
     def handle(self, args: str, store: ProfileStore) -> str:
         # Split only on commas; phrases like "sparse autoencoder" stay intact.
@@ -23,14 +23,14 @@ class AddKeywordsCommand(Command):
         keywords = [kw for kw in keywords if kw]
 
         if not keywords:
-            return "Uso: /add_keywords keyword1, keyword2, ..."
+            return "Usage: /add_keywords keyword1, keyword2, ..."
 
         added = store.add_keywords(keywords)
         present = present_items(keywords, added)
 
         lines: list[str] = []
         if added:
-            lines.append(format_added("Keyword aggiunte", added))
+            lines.append(format_added("Keywords added", added))
         if present:
-            lines.append(format_already_present("Keyword", present))
+            lines.append(format_already_present("Keywords", present))
         return "\n".join(lines)
