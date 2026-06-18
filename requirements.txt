@@ -3,9 +3,11 @@ requests>=2.31
 feedparser>=6.0
 PyYAML>=6.0
 
-# Phase 2 (embeddings) — uncomment when we add SPECTER2 ranking
-# numpy>=1.26
-# sentence-transformers>=3.0
+# Phase 2 (embeddings) — SPECTER paper embeddings for similarity ranking
+numpy>=1.26
+sentence-transformers>=3.0
+# torch is pulled by sentence-transformers. In CI / no-GPU, install the CPU wheel:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 # Phase 3 (social) — uncomment when we add Bluesky
 # atproto>=0.0.55

@@ -7,8 +7,10 @@ Phase 1: arXiv -> keyword+author scoring -> console output.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from src.commands.add_author import AddAuthorCommand
@@ -21,6 +23,9 @@ from src.commands.remove_conference import RemoveConferenceCommand
 from src.commands.remove_keywords import RemoveKeywordsCommand
 from src.commands.remove_topic import RemoveTopicCommand
 from src.config import apply_profile_overlay, load_config
+from src.embedding.profile_vector import load_or_build
+from src.embedding.specter import SpecterEmbedder
+from src.enrich.semantic_scholar import resolve_author_ids
 from src.env import load_env
 from src.notify.base import Notifier
 from src.notify.console_notifier import ConsoleNotifier
@@ -28,12 +33,15 @@ from src.notify.telegram_notifier import TelegramNotifier
 from src.pipeline import Pipeline
 from src.scoring.author_scorer import AuthorScorer
 from src.scoring.combined import CombinedScorer
+from src.scoring.embedding_scorer import EmbeddingScorer
 from src.scoring.field_classifier import FieldClassifier
 from src.scoring.keyword_scorer import KeywordScorer
 from src.sources.arxiv_source import ArxivSource
 from src.store.profile_store import ProfileStore
 from src.store.sqlite_store import SqliteStore
 from src.telegram_poller import TelegramPoller
+
+logger = logging.getLogger("main")
 
 
 def build_commands() -> list:
@@ -63,7 +71,8 @@ def build_notifier(kind: str, parser: argparse.ArgumentParser, field_classifier)
     return ConsoleNotifier(field_classifier=field_classifier)
 
 
-def build_pipeline(cfg, store, notifier) -> Pipeline:
+def build_pipeline(cfg, store, notifier,
+                   profile_vector_path: str = "data/profile_vector.json") -> Pipeline:
     arxiv_cfg = cfg.sources.get("arxiv", {})
     sources = [
         ArxivSource(
@@ -72,8 +81,48 @@ def build_pipeline(cfg, store, notifier) -> Pipeline:
             lookback_days=int(arxiv_cfg.get("lookback_days", 2)),
         )
     ]
-    scorer = CombinedScorer({"keyword": KeywordScorer(), "author": AuthorScorer()})
+    # The embedder is lazy: load_or_build only downloads/runs SPECTER when there
+    # are seed papers and the cached vector is stale. With no seeds the profile
+    # vector is None and EmbeddingScorer is a no-op (the model never loads).
+    embedder = SpecterEmbedder()
+    seed_vectors = load_or_build(list(cfg.profile.seed_arxiv_ids), embedder, profile_vector_path)
+    if seed_vectors is None:
+        logger.info("no seed papers -> embedding scorer is a no-op")
+    scorer = CombinedScorer({
+        "keyword": KeywordScorer(),
+        "author": AuthorScorer(),
+        "embedding": EmbeddingScorer(embedder, seed_vectors),
+    })
     return Pipeline(sources, scorer, store, notifier, cfg.profile, cfg.thresholds)
+
+
+def enrich_author_ids(profile, cache_path: str = "data/author_ids.json"):
+    """Fill profile.author_ids from Semantic Scholar (cached), if a key is set.
+
+    No-op without SEMANTIC_SCHOLAR_API_KEY. Resolved ids are cached by name so we
+    don't re-query S2 every run; only names not yet in the cache are looked up.
+    """
+    api_key = os.environ.get("SEMANTIC_SCHOLAR_API_KEY")
+    if not api_key or not profile.author_names:
+        return profile
+
+    cache: dict = {}
+    if os.path.exists(cache_path):
+        try:
+            with open(cache_path, "r", encoding="utf-8") as fh:
+                cache = json.load(fh)
+        except (OSError, ValueError):
+            cache = {}
+
+    missing = [name for name in profile.author_names if name not in cache]
+    if missing:
+        cache.update(resolve_author_ids(missing, api_key=api_key))
+        os.makedirs(os.path.dirname(cache_path) or ".", exist_ok=True)
+        with open(cache_path, "w", encoding="utf-8") as fh:
+            json.dump(cache, fh, ensure_ascii=False, indent=2)
+
+    author_ids = tuple(cache[name] for name in profile.author_names if cache.get(name))
+    return replace(profile, author_ids=author_ids)
 
 
 def main() -> None:
@@ -117,8 +166,10 @@ def main() -> None:
             store.close()
         return
 
-    # Pipeline mode: merge the user's runtime additions on top of the YAML seed.
+    # Pipeline mode: merge the user's runtime additions on top of the YAML seed,
+    # then resolve author ids via S2 (no-op without an API key).
     cfg = apply_profile_overlay(cfg, profile_store)
+    cfg = replace(cfg, profile=enrich_author_ids(cfg.profile))
     field_classifier = FieldClassifier(cfg.topics)
     notifier = build_notifier(args.notifier, parser, field_classifier)
     pipeline = build_pipeline(cfg, store, notifier)
