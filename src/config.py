@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import yaml
 
 from src.domain.profile import ScoreWeights, UserProfile
 from src.pipeline import Thresholds
+from src.store.profile_store import ProfileStore
 
 
 @dataclass
@@ -33,6 +34,7 @@ def load_config(path: str) -> AppConfig:
         keywords=tuple(raw.get("keywords", []) or ()),
         author_names=tuple(raw.get("authors", []) or ()),
         seed_arxiv_ids=tuple(raw.get("seed_arxiv_ids", []) or ()),
+        conferences=tuple(raw.get("conferences", []) or ()),
         weights=weights,
     )
     thr_raw = raw.get("thresholds", {}) or {}
@@ -46,3 +48,35 @@ def load_config(path: str) -> AppConfig:
         sources=raw.get("sources", {}) or {},
         topics=raw.get("topics", {}) or {},
     )
+
+
+def apply_profile_overlay(cfg: AppConfig, store: ProfileStore) -> AppConfig:
+    """Merge the user's runtime additions (ProfileStore) on top of the YAML seed.
+
+    The YAML stays the immutable seed; everything added via bot commands is
+    unioned in here (case-insensitive dedup, seed entries first).
+    """
+    profile = cfg.profile
+    merged_profile = replace(
+        profile,
+        keywords=_union(profile.keywords, store.keywords),
+        author_names=_union(profile.author_names, store.authors),
+        conferences=_union(profile.conferences, store.conferences),
+    )
+
+    topics = {name: list(kws) for name, kws in cfg.topics.items()}
+    for name, kws in store.topics.items():
+        key = next((k for k in topics if k.lower() == name.lower()), name)
+        topics[key] = list(_union(tuple(topics.get(key, [])), kws))
+
+    return replace(cfg, profile=merged_profile, topics=topics)
+
+
+def _union(base: tuple[str, ...], extra: list[str]) -> tuple[str, ...]:
+    seen = {x.lower() for x in base}
+    out = list(base)
+    for value in extra:
+        if value.lower() not in seen:
+            out.append(value)
+            seen.add(value.lower())
+    return tuple(out)

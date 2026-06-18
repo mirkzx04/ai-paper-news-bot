@@ -20,6 +20,14 @@ class Store(ABC):
     def mark_seen(self, key: str, when: datetime) -> None: ...
 
     @abstractmethod
+    def get_meta(self, key: str) -> str | None:
+        """Read a small key/value (e.g. the Telegram update offset)."""
+
+    @abstractmethod
+    def set_meta(self, key: str, value: str) -> None:
+        """Write a small key/value."""
+
+    @abstractmethod
     def close(self) -> None: ...
 
     def filter_unseen(self, items: list[Item]) -> list[Item]:

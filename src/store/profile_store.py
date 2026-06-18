@@ -1,0 +1,150 @@
+"""ProfileStore — mutable overlay of user-added interests (JSON-backed).
+
+Kept SEPARATE from `config/profile.yaml`: the YAML stays the human-edited seed
+(with its comments), while everything the user adds at runtime via bot commands
+(`/add_author`, `/add_keywords`, `/add_topic`, `/add_conference`) lands here and
+is merged on top at load time (see `config.apply_profile_overlay`). This matches
+the planned deployment where mutable state is JSON committed to a `state` branch.
+
+All mutations dedup case-insensitively while preserving the user's casing, and
+auto-save. Mutators return the items that were *newly* added, so command
+handlers can give precise replies ("added X", "already present: Y").
+"""
+
+from __future__ import annotations
+
+import json
+import os
+
+
+class ProfileStore:
+    _LIST_KEYS = ("authors", "keywords", "conferences")
+
+    def __init__(self, path: str = "data/profile_overlay.json") -> None:
+        self.path = path
+        self._data: dict = {"authors": [], "keywords": [], "topics": {}, "conferences": []}
+        self._load()
+
+    # ---- persistence -------------------------------------------------------
+    def _load(self) -> None:
+        if not os.path.exists(self.path):
+            return
+        with open(self.path, "r", encoding="utf-8") as fh:
+            loaded = json.load(fh)
+        for key in self._data:
+            if key in loaded:
+                self._data[key] = loaded[key]
+
+    def _save(self) -> None:
+        os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
+        with open(self.path, "w", encoding="utf-8") as fh:
+            json.dump(self._data, fh, ensure_ascii=False, indent=2)
+
+    # ---- accessors (used by the config overlay merge) ----------------------
+    @property
+    def authors(self) -> list[str]:
+        return list(self._data["authors"])
+
+    @property
+    def keywords(self) -> list[str]:
+        return list(self._data["keywords"])
+
+    @property
+    def conferences(self) -> list[str]:
+        return list(self._data["conferences"])
+
+    @property
+    def topics(self) -> dict[str, list[str]]:
+        return {name: list(kws) for name, kws in self._data["topics"].items()}
+
+    # ---- mutations ---------------------------------------------------------
+    def add_authors(self, names: list[str]) -> list[str]:
+        return self._add_to_list("authors", names)
+
+    def add_keywords(self, keywords: list[str]) -> list[str]:
+        return self._add_to_list("keywords", keywords)
+
+    def add_conferences(self, names: list[str]) -> list[str]:
+        return self._add_to_list("conferences", names)
+
+    def add_topic(self, name: str, keywords: list[str]) -> tuple[bool, list[str]]:
+        """Create/extend a topic. Returns (topic_was_created, newly_added_keywords)."""
+        name = name.strip()
+        if not name:
+            return (False, [])
+        topics = self._data["topics"]
+        existing_key = next((k for k in topics if k.lower() == name.lower()), None)
+        created = existing_key is None
+        key = existing_key or name
+        topics.setdefault(key, [])
+        added = _append_unique(topics[key], keywords)
+        if created or added:
+            self._save()
+        return (created, added)
+
+    def remove_authors(self, names: list[str]) -> list[str]:
+        return self._remove_from_list("authors", names)
+
+    def remove_keywords(self, keywords: list[str]) -> list[str]:
+        return self._remove_from_list("keywords", keywords)
+
+    def remove_conferences(self, names: list[str]) -> list[str]:
+        return self._remove_from_list("conferences", names)
+
+    def remove_topic(self, name: str, keywords: list[str]) -> tuple[str, list[str]]:
+        """Remove a whole topic (no keywords given) or specific keywords from it.
+
+        Returns one of:
+          ("not_found", [])            -> the topic doesn't exist
+          ("topic_removed", [])        -> the whole topic was deleted
+          ("keywords_removed", [...])  -> the listed keywords removed from the topic
+                                          (the list is empty if none matched)
+        """
+        name = name.strip()
+        topics = self._data["topics"]
+        existing_key = next((k for k in topics if k.lower() == name.lower()), None)
+        if existing_key is None:
+            return ("not_found", [])
+        if not keywords:
+            del topics[existing_key]
+            self._save()
+            return ("topic_removed", [])
+        removed = _remove_unique(topics[existing_key], keywords)
+        if removed:
+            self._save()
+        return ("keywords_removed", removed)
+
+    # ---- internals ---------------------------------------------------------
+    def _add_to_list(self, key: str, items: list[str]) -> list[str]:
+        added = _append_unique(self._data[key], items)
+        if added:
+            self._save()
+        return added
+
+    def _remove_from_list(self, key: str, items: list[str]) -> list[str]:
+        removed = _remove_unique(self._data[key], items)
+        if removed:
+            self._save()
+        return removed
+
+
+def _append_unique(target: list[str], items: list[str]) -> list[str]:
+    """Append items not already present (case-insensitive), return what was added."""
+    existing = {x.lower() for x in target}
+    added: list[str] = []
+    for raw in items:
+        value = raw.strip()
+        if not value or value.lower() in existing:
+            continue
+        target.append(value)
+        existing.add(value.lower())
+        added.append(value)
+    return added
+
+
+def _remove_unique(target: list[str], items: list[str]) -> list[str]:
+    """Remove items (case-insensitive) from target in place; return what was removed."""
+    wanted = {x.lower() for x in items}
+    removed = [value for value in target if value.lower() in wanted]
+    target[:] = [value for value in target if value.lower() not in wanted]
+    return removed

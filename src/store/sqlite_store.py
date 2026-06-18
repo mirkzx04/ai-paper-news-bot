@@ -22,6 +22,12 @@ class SqliteStore(Store):
             "  first_seen TEXT NOT NULL"
             ")"
         )
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS meta ("
+            "  key TEXT PRIMARY KEY,"
+            "  value TEXT NOT NULL"
+            ")"
+        )
         self.conn.commit()
 
     def is_seen(self, key: str) -> bool:
@@ -32,6 +38,19 @@ class SqliteStore(Store):
         self.conn.execute(
             "INSERT OR IGNORE INTO seen (key, first_seen) VALUES (?, ?)",
             (key, when.isoformat()),
+        )
+        self.conn.commit()
+
+    def get_meta(self, key: str) -> str | None:
+        cur = self.conn.execute("SELECT value FROM meta WHERE key = ?", (key,))
+        row = cur.fetchone()
+        return row[0] if row else None
+
+    def set_meta(self, key: str, value: str) -> None:
+        self.conn.execute(
+            "INSERT INTO meta (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
         )
         self.conn.commit()
 

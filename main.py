@@ -11,7 +11,16 @@ import logging
 import os
 from datetime import datetime, timedelta, timezone
 
-from src.config import load_config
+from src.commands.add_author import AddAuthorCommand
+from src.commands.add_conference import AddConferenceCommand
+from src.commands.add_keywords import AddKeywordsCommand
+from src.commands.add_topic import AddTopicCommand
+from src.commands.dispatch import CommandDispatcher
+from src.commands.remove_author import RemoveAuthorCommand
+from src.commands.remove_conference import RemoveConferenceCommand
+from src.commands.remove_keywords import RemoveKeywordsCommand
+from src.commands.remove_topic import RemoveTopicCommand
+from src.config import apply_profile_overlay, load_config
 from src.env import load_env
 from src.notify.base import Notifier
 from src.notify.console_notifier import ConsoleNotifier
@@ -22,7 +31,23 @@ from src.scoring.combined import CombinedScorer
 from src.scoring.field_classifier import FieldClassifier
 from src.scoring.keyword_scorer import KeywordScorer
 from src.sources.arxiv_source import ArxivSource
+from src.store.profile_store import ProfileStore
 from src.store.sqlite_store import SqliteStore
+from src.telegram_poller import TelegramPoller
+
+
+def build_commands() -> list:
+    """The Telegram slash-commands the bot understands."""
+    return [
+        AddAuthorCommand(),
+        AddKeywordsCommand(),
+        AddTopicCommand(),
+        AddConferenceCommand(),
+        RemoveAuthorCommand(),
+        RemoveKeywordsCommand(),
+        RemoveTopicCommand(),
+        RemoveConferenceCommand(),
+    ]
 
 
 def build_notifier(kind: str, parser: argparse.ArgumentParser, field_classifier) -> Notifier:
@@ -55,7 +80,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="AI paper news bot (Phase 1)")
     parser.add_argument("--config", default="config/profile.yaml")
     parser.add_argument("--db", default="data/bot.db")
+    parser.add_argument("--overlay", default="data/profile_overlay.json",
+                        help="JSON file with the user's runtime profile additions")
     parser.add_argument("--notifier", choices=["console", "telegram"], default="console")
+    parser.add_argument("--poll-commands", action="store_true",
+                        help="process incoming Telegram commands (/add_author, ...) and exit")
     parser.add_argument("--lookback-days", type=int, default=None,
                         help="override the source lookback window")
     parser.add_argument("--dry-run", action="store_true",
@@ -72,6 +101,24 @@ def main() -> None:
     cfg = load_config(args.config)
     os.makedirs(os.path.dirname(args.db) or ".", exist_ok=True)
     store = SqliteStore(args.db)
+    profile_store = ProfileStore(args.overlay)
+
+    # Command-poll mode: read pending commands, mutate the overlay, reply, exit.
+    if args.poll_commands:
+        token = os.environ.get("TELEGRAM_BOT_TOKEN")
+        if not token:
+            parser.error("--poll-commands richiede TELEGRAM_BOT_TOKEN (in .env o nell'ambiente).")
+        dispatcher = CommandDispatcher(build_commands(), profile_store)
+        poller = TelegramPoller(token, dispatcher, store)
+        try:
+            sent = poller.poll_once()
+            print(f"comandi processati, risposte inviate: {sent}")
+        finally:
+            store.close()
+        return
+
+    # Pipeline mode: merge the user's runtime additions on top of the YAML seed.
+    cfg = apply_profile_overlay(cfg, profile_store)
     field_classifier = FieldClassifier(cfg.topics)
     notifier = build_notifier(args.notifier, parser, field_classifier)
     pipeline = build_pipeline(cfg, store, notifier)
