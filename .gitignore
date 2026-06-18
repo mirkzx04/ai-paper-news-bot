@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Local state / secrets (state lives on the `state` branch in CI)
+.env
+*.db
+*.sqlite
+data/
+state/
+
+# HF / model cache
+.cache/

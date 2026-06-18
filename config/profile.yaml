@@ -1,0 +1,100 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Profilo di interessi. Seedato dai tuoi temi (MoE, interpretability, training
+# dynamics, reasoning). CURA questa lista: keyword troppo generiche ("routing",
+# "reasoning", "optimization") fanno rumore — meglio specifiche.
+# ─────────────────────────────────────────────────────────────────────────────
+user_id: mirko
+
+keywords:
+  # Mixture-of-Experts (il tuo focus principale, incl. PCE)
+  - mixture of experts
+  - mixture-of-experts
+  - moe
+  - sparse moe
+  - expert routing
+  - expert specialization
+  - load balancing loss
+  - token routing
+  # Interpretability
+  - mechanistic interpretability
+  - sparse autoencoder
+  - superposition
+  - polysemanticity
+  - feature steering
+  # Training dynamics / optimization
+  - training dynamics
+  - grokking
+  - loss landscape
+  - emergent abilities
+  # LLM reasoning / RLVR
+  - verifiable rewards
+  - rlvr
+  - chain-of-thought
+  - process reward model
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tassonomia dei campi di ricerca. Raggruppa le keyword qui sopra in aree
+# tematiche: il FieldClassifier le usa per etichettare ogni item con il campo
+# (o i campi) di ricerca a cui appartiene. Riusa le STESSE keyword di `keywords`,
+# con qualche sinonimo ovvio in più. NON serve che sia esaustiva.
+# ─────────────────────────────────────────────────────────────────────────────
+topics:
+  Mixture-of-Experts:
+    - mixture of experts
+    - mixture-of-experts
+    - moe
+    - sparse moe
+    - expert routing
+    - expert specialization
+    - load balancing loss
+    - token routing
+  Interpretability:
+    - mechanistic interpretability
+    - sparse autoencoder
+    - superposition
+    - polysemanticity
+    - feature steering
+  Training dynamics:
+    - training dynamics
+    - grokking
+    - loss landscape
+    - emergent abilities
+  LLM reasoning:
+    - verifiable rewards
+    - rlvr
+    - chain-of-thought
+    - process reward model
+    - reasoning
+
+# Nomi autori da seguire (match su display name; in Phase 2 risolviamo gli
+# author-id stabili via Semantic Scholar). Lista STARTER — sostituisci con i tuoi.
+authors:
+  - Neel Nanda
+  - Chris Olah
+  - Catherine Olsson
+  - Nelson Elhage
+  - Jacob Steinhardt
+  - Noam Shazeer
+  - William Fedus
+  - Barret Zoph
+  - Jason Wei
+
+# Paper-seed per costruire il profile-vector (Phase 2). arXiv id, es. "2401.12345".
+seed_arxiv_ids: []
+
+# Contributo assoluto di ogni segnale:  total = min(1, Σ wᵢ·sᵢ)
+weights:
+  keyword: 0.6      # 1 keyword nel titolo (~0.63) -> ~0.38 -> supera il digest
+  author: 1.0       # un autore seguito da solo basta per l'alert
+  embedding: 0.6    # attivo da Phase 2
+
+# Soglie di routing
+thresholds:
+  digest: 0.30      # ~2 keyword nel titolo
+  alert: 0.60       # match forte (keyword+embedding) o autore seguito
+
+sources:
+  arxiv:
+    categories: [cs.LG, cs.CL, cs.CV, cs.AI, stat.ML]
+    max_results: 150
+    lookback_days: 2

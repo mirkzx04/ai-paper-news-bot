@@ -1,0 +1,11 @@
+# Phase 1 (paper backbone) — kept light on purpose
+requests>=2.31
+feedparser>=6.0
+PyYAML>=6.0
+
+# Phase 2 (embeddings) — uncomment when we add SPECTER2 ranking
+# numpy>=1.26
+# sentence-transformers>=3.0
+
+# Phase 3 (social) — uncomment when we add Bluesky
+# atproto>=0.0.55
