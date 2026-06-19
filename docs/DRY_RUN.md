@@ -201,6 +201,25 @@ the bot process and reply (each `--poll-commands` drains the queue once).
 
 ---
 
+## Known limitation — delayed callback ack (cron)
+
+Telegram invalidates a `callback_query` a few seconds after the tap, so
+`answerCallbackQuery` only succeeds if the bot polls **within seconds** of the
+vote — i.e. during a local test where you poll right away. Under the unattended
+**cron (twice a day)**, votes are collected *hours* later, so:
+
+- the **"👍 registrato" toast does not appear**, and the client spinner just times
+  out after a couple of seconds;
+- but the **vote is still recorded** (the ack is unrelated to writing the event),
+  and the **✅ affordance still applies** at the next poll (`editMessageReplyMarkup`
+  works for up to 48h).
+
+So the feedback is fully captured; only the *instant* visual confirmation is lost in
+cron mode. A real-time ack would require switching from polling to a **webhook**,
+which is out of scope for the current MVP.
+
+---
+
 ## 4. Final checklist — what must work
 
 - [ ] **§2** Smoke message arrives (token + chat id are correct).
