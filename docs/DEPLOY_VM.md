@@ -89,7 +89,7 @@ sudo install -d -o paperbot -g paperbot /opt/paper-news-bot
 sudo -u paperbot -H bash       # become paperbot in a login shell
 cd /opt/paper-news-bot
 
-git clone https://github.com/mirkzx04/telegram_bot_news_ai .
+git clone https://github.com/mirkzx04/ai-paper-news-bot.git .
 
 python3.12 -m venv .venv
 source .venv/bin/activate
