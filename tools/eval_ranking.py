@@ -127,14 +127,37 @@ def ndcg_at_k(scores, labels, k):
     return float((g * d).sum()) / idcg if idcg > 0 else float("nan")
 
 
-def main():
-    fetched = fetch_by_ids([i for i, _ in SEEDS + POSITIVES + HARD_NEG])
+def load_preference_positives(path: str) -> list[tuple[str, str]]:
+    """Fold the user's exported seed positives into the eval as extra positives.
+
+    Returns ``(arxiv_id, expect)`` pairs in the same shape as ``POSITIVES``.
+    Since the export gives only ids (no expected title to verify against), we
+    use ``""`` as the expectation, which always passes the substring title
+    check in ``main`` — these ids are the user's own saved seeds, not a curated
+    list we need to guard against id/title drift. Ids already in ``POSITIVES``
+    are skipped to avoid duplicate candidates.
+    """
+    from preference_export import export_labels
+    from src.store.preference_dataset import PreferenceDataset
+
+    labels = export_labels(PreferenceDataset(path))
+    have = {aid for aid, _ in POSITIVES}
+    return [(aid, "") for aid in labels["seed_positives"] if aid not in have]
+
+
+def main(preferences_path: str | None = None):
+    extra_pos = load_preference_positives(preferences_path) if preferences_path else []
+    if extra_pos:
+        print(f"preference export: +{len(extra_pos)} seed positives from {preferences_path}")
+    positives = POSITIVES + extra_pos
+
+    fetched = fetch_by_ids([i for i, _ in SEEDS + positives + HARD_NEG])
     time.sleep(3)
 
     cands = []  # (id, label, kind, title, text)
     dropped = []
-    for arxiv_id, expect in POSITIVES + HARD_NEG:
-        label = 1 if (arxiv_id, expect) in POSITIVES else 0
+    for arxiv_id, expect in positives + HARD_NEG:
+        label = 1 if (arxiv_id, expect) in positives else 0
         kind = "pos" if label else "hard"
         if arxiv_id not in fetched or expect.lower() not in fetched[arxiv_id][0].lower():
             dropped.append((arxiv_id, expect))
@@ -204,4 +227,15 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Ranking accuracy eval")
+    parser.add_argument(
+        "--preferences", nargs="?", const="data/preferences.jsonl", default=None,
+        metavar="PATH",
+        help="also use the user's exported seed positives from this preference "
+             "dataset (default path: data/preferences.jsonl). Omit the flag to "
+             "run on the hard-coded curated set only.",
+    )
+    args = parser.parse_args()
+    main(preferences_path=args.preferences)
