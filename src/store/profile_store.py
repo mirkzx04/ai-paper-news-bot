@@ -40,6 +40,12 @@ class ProfileStore:
     _KEY_TO_KIND = {"authors": "author", "keywords": "keyword",
                     "conferences": "conference", "seeds": "seed"}
 
+    # Canonical digest-frequency values (the contract). The coordinator in
+    # main.py reads `digest_frequency` to decide whether a given cron run should
+    # actually send; this store only persists the chosen value.
+    DIGEST_FREQUENCIES = ("2x_daily", "daily", "weekly")
+    DEFAULT_DIGEST_FREQUENCY = "2x_daily"
+
     def __init__(
         self,
         path: str = "data/profile_overlay.json",
@@ -48,8 +54,12 @@ class ProfileStore:
         self.path = path
         # Optional observer; None => no notifications, identical to prior behaviour.
         self._listener = listener
+        # `digest_frequency` is a scalar preference (the others are collections).
+        # A pre-existing overlay WITHOUT this key keeps the default on load, since
+        # `_load` only overwrites keys it actually finds in the JSON.
         self._data: dict = {"authors": [], "keywords": [], "topics": {},
-                            "conferences": [], "seeds": []}
+                            "conferences": [], "seeds": [],
+                            "digest_frequency": self.DEFAULT_DIGEST_FREQUENCY}
         self._load()
 
     # ---- observer ----------------------------------------------------------
@@ -73,8 +83,13 @@ class ProfileStore:
         with open(self.path, "r", encoding="utf-8") as fh:
             loaded = json.load(fh)
         for key in self._data:
-            if key in loaded:
-                self._data[key] = loaded[key]
+            if key not in loaded:
+                continue
+            # Defensive: a persisted `digest_frequency` outside the canonical set
+            # (corruption, hand-editing) must not poison the store — keep default.
+            if key == "digest_frequency" and loaded[key] not in self.DIGEST_FREQUENCIES:
+                continue
+            self._data[key] = loaded[key]
 
     def _save(self) -> None:
         os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
@@ -102,7 +117,29 @@ class ProfileStore:
     def topics(self) -> dict[str, list[str]]:
         return {name: list(kws) for name, kws in self._data["topics"].items()}
 
+    @property
+    def digest_frequency(self) -> str:
+        """How often the user wants the digest: one of `DIGEST_FREQUENCIES`.
+
+        Falls back to the default if the key is somehow absent (e.g. an overlay
+        written before this field existed and not yet re-saved).
+        """
+        return self._data.get("digest_frequency", self.DEFAULT_DIGEST_FREQUENCY)
+
     # ---- mutations ---------------------------------------------------------
+    def set_digest_frequency(self, value: str) -> bool:
+        """Persist the digest frequency if `value` is canonical.
+
+        Returns True and saves when `value` is one of `DIGEST_FREQUENCIES`;
+        returns False and changes nothing otherwise. Parsing user-friendly
+        synonyms into a canonical value is the command's job, not the store's.
+        """
+        if value not in self.DIGEST_FREQUENCIES:
+            return False
+        self._data["digest_frequency"] = value
+        self._save()
+        return True
+
     def add_authors(self, names: list[str]) -> list[str]:
         return self._add_to_list("authors", names)
 

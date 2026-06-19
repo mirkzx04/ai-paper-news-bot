@@ -24,6 +24,7 @@ from src.commands.remove_conference import RemoveConferenceCommand
 from src.commands.remove_keywords import RemoveKeywordsCommand
 from src.commands.remove_topic import RemoveTopicCommand
 from src.commands.report import ReportCommand
+from src.commands.set_frequency import SetFrequencyCommand
 from src.config import apply_profile_overlay, load_config
 from src.embedding.feedback_vectors import load_or_build_feedback_vectors
 from src.embedding.profile_vector import load_or_build
@@ -52,6 +53,8 @@ from src.telegram_poller import TelegramPoller
 
 logger = logging.getLogger("main")
 
+_LAST_DIGEST_KEY = "last_digest_at"  # meta key: UTC ISO time of the last sent digest
+
 
 def _admin_push(token: str, chat_id, text: str) -> None:
     """Best-effort one-off push to the bot owner (admin) in digest mode.
@@ -74,10 +77,40 @@ def _heartbeat_text(summary: RunSummary) -> str:
     scoring-error count even when those errors weren't fatal. Pure formatting,
     so it's testable without running the pipeline.
     """
+    capped = (f" (top {summary.digest} di {summary.digest_total})"
+              if summary.digest_total > summary.digest else "")
     return (
-        f"✅ digest: {summary.alerts} alert + {summary.digest} digest inviati"
+        f"✅ digest: {summary.alerts} alert + {summary.digest} digest inviati{capped}"
         f" · {summary.fresh} nuovi · {summary.scoring_errors} scoring-error"
     )
+
+
+def _parse_dt(raw):
+    """Parse an ISO-8601 timestamp from meta storage; None on missing/garbage."""
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+
+
+def _digest_is_due(frequency: str, last, now) -> bool:
+    """Whether to send the digest on this cron tick, given the user's frequency.
+
+    The cron is the fixed max tick (2x/day); the user picks a frequency <= it via
+    /set_frequency. Never sent yet (last is None) -> always due.
+      - 2x_daily: every tick.
+      - daily:    at most once per UTC calendar day (first tick of the day sends).
+      - weekly:   >= ~6.5 days since the last send (tolerates cron jitter).
+    """
+    if last is None:
+        return True
+    if frequency == "daily":
+        return last.date() < now.date()
+    if frequency == "weekly":
+        return (now - last) >= timedelta(days=6, hours=12)
+    return True  # "2x_daily" or unknown -> every tick
 
 
 def build_commands() -> list:
@@ -92,6 +125,7 @@ def build_commands() -> list:
         RemoveTopicCommand(),
         RemoveConferenceCommand(),
         ReportCommand(),
+        SetFrequencyCommand(),
     ]
 
 
@@ -149,7 +183,8 @@ def build_pipeline(cfg, store, notifier,
             baseline_neg=fb.baseline_neg, neg_lambda=fb.neg_lambda,
         ),
     })
-    return Pipeline(sources, scorer, store, notifier, cfg.profile, cfg.thresholds)
+    return Pipeline(sources, scorer, store, notifier, cfg.profile, cfg.thresholds,
+                    digest_cap=cfg.digest_cap)
 
 
 def enrich_author_ids(profile, cache_path: str = "data/author_ids.json"):
@@ -254,6 +289,29 @@ def main() -> None:
     # then resolve author ids via S2 (no-op without an API key).
     cfg = apply_profile_overlay(cfg, profile_store)
     cfg = replace(cfg, profile=enrich_author_ids(cfg.profile))
+
+    # Digest cadence: the cron is the fixed max tick (2x/day); the user's
+    # /set_frequency preference decides whether THIS tick actually sends. An
+    # explicit --lookback-days is a manual override that always sends. We check
+    # before building the pipeline so a no-send tick never loads SPECTER.
+    now = datetime.now(timezone.utc)
+    manual = args.lookback_days is not None
+    last_dt = _parse_dt(store.get_meta(_LAST_DIGEST_KEY))
+    if not manual and not _digest_is_due(profile_store.digest_frequency, last_dt, now):
+        logger.info("digest skipped: frequency=%s, last=%s",
+                    profile_store.digest_frequency, last_dt)
+        store.close()
+        return
+
+    # Dynamic lookback: fetch everything since the last digest so nothing is missed
+    # between low-frequency sends (the digest is then capped to the top-N by score).
+    if manual:
+        since = now - timedelta(days=args.lookback_days)
+    elif last_dt is not None:
+        since = last_dt
+    else:
+        since = now - timedelta(days=int(cfg.sources.get("arxiv", {}).get("lookback_days", 2)))
+
     field_classifier = FieldClassifier(cfg.topics)
     # Record each sent paper so its 👍/👎 vote (arriving on a later run) resolves
     # back to it. Only the Telegram notifier needs it; shares data/bot.db.
@@ -261,11 +319,6 @@ def main() -> None:
     notifier = build_notifier(args.notifier, parser, field_classifier,
                               sent_items=sent_items, preference_dataset=preference_dataset)
     pipeline = build_pipeline(cfg, store, notifier)
-
-    lookback = args.lookback_days
-    if lookback is None:
-        lookback = int(cfg.sources.get("arxiv", {}).get("lookback_days", 2))
-    since = datetime.now(timezone.utc) - timedelta(days=lookback)
 
     # Observability (telegram mode only): the cron is unattended, so a crash
     # must land somewhere visible. On failure we persist the full traceback to
@@ -278,6 +331,8 @@ def main() -> None:
     is_telegram = args.notifier == "telegram"
     try:
         summary = pipeline.run(since, mark_seen=not args.dry_run)
+        if not args.dry_run:
+            store.set_meta(_LAST_DIGEST_KEY, now.isoformat())
         if is_telegram and chat_id:
             _admin_push(token, chat_id, _heartbeat_text(summary))
     except Exception as exc:

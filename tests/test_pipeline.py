@@ -139,6 +139,7 @@ def build_pipeline(
     *,
     store: FakeStore | None = None,
     thresholds: Thresholds | None = None,
+    digest_cap: int = 5,
 ) -> tuple[Pipeline, FakeScorer, FakeStore, FakeNotifier]:
     scorer = FakeScorer(table)
     store = store or FakeStore()
@@ -151,6 +152,7 @@ def build_pipeline(
         notifier=notifier,
         profile=profile,
         thresholds=thresholds or Thresholds(digest=0.30, alert=0.60),
+        digest_cap=digest_cap,
     )
     return pipe, scorer, store, notifier
 
@@ -259,8 +261,10 @@ class AllValidRoutingTest(unittest.TestCase):
         self.assertEqual(summary.fresh, 4)
         self.assertEqual(
             summary,
+            # digest_total added to the contract; here digest==digest_total
+            # because only 1 digest item exists (well under the default cap=5).
             RunSummary(fetched=4, unique=4, fresh=4, relevant=3,
-                       alerts=2, digest=1, scoring_errors=0),
+                       alerts=2, digest=1, digest_total=1, scoring_errors=0),
         )
 
     def test_dry_run_does_not_mark_seen_but_still_routes(self) -> None:
@@ -299,6 +303,121 @@ class EdgeCountsTest(unittest.TestCase):
         self.assertNotIn("s2:old", scorer.calls)
         self.assertEqual(notifier.keys("alert"), {"s2:dup"})
         self.assertEqual(notifier.keys("digest"), {"s2:new"})
+
+
+class DigestCapTest(unittest.TestCase):
+    """The top-N digest cap: bounds the digest, never the alerts."""
+
+    def test_only_top_n_digest_sent_and_they_are_the_right_ones(self) -> None:
+        # 8 digest-worthy items (>=0.30, <0.60), distinct scores; cap at 5.
+        # Expect the 5 highest-scoring to be sent, the 3 lowest dropped.
+        scores = {
+            "s2:d1": 0.31, "s2:d2": 0.58, "s2:d3": 0.42, "s2:d4": 0.55,
+            "s2:d5": 0.39, "s2:d6": 0.50, "s2:d7": 0.34, "s2:d8": 0.47,
+        }
+        items = [make_item(k.split(":")[1]) for k in scores]
+        table = {k: result(v, keyword=v) for k, v in scores.items()}
+        pipe, _, store, notifier = build_pipeline(items, table, digest_cap=5)
+
+        summary = pipe.run(since=None)
+
+        # Top 5 by score: d2(.58) d4(.55) d6(.50) d8(.47) d3(.42).
+        self.assertEqual(
+            notifier.keys("digest"),
+            {"s2:d2", "s2:d4", "s2:d6", "s2:d8", "s2:d3"},
+        )
+        # The 3 below the cut are NOT delivered.
+        for dropped in ("s2:d5", "s2:d7", "s2:d1"):
+            self.assertNotIn(dropped, notifier.keys("digest"))
+        # Summary distinguishes sent (5) from total relevant digest (8).
+        self.assertEqual(summary.digest, 5)
+        self.assertEqual(summary.digest_total, 8)
+        self.assertEqual(summary.relevant, 8)
+        self.assertEqual(summary.alerts, 0)
+        # mark_seen marks ALL evaluated items, incl. the 3 dropped by the cap.
+        self.assertEqual(set(store.seen), set(scores))
+
+    def test_alerts_are_never_capped(self) -> None:
+        # 7 alerts + 9 digest, cap=5 -> all 7 alerts, only 5 digest.
+        alert_scores = {f"s2:al{i}": 0.70 + i * 0.01 for i in range(7)}
+        digest_scores = {f"s2:dg{i}": 0.31 + i * 0.02 for i in range(9)}
+        items = [make_item(k.split(":")[1]) for k in (*alert_scores, *digest_scores)]
+        table = {k: result(v, keyword=v) for k, v in alert_scores.items()}
+        table |= {k: result(v, keyword=v) for k, v in digest_scores.items()}
+        pipe, _, store, notifier = build_pipeline(items, table, digest_cap=5)
+
+        summary = pipe.run(since=None)
+
+        # Every alert is delivered — the cap must not touch this channel.
+        self.assertEqual(notifier.keys("alert"), set(alert_scores))
+        self.assertEqual(summary.alerts, 7)
+        # Digest is capped to 5 of the 9 relevant ones.
+        self.assertEqual(len(notifier.keys("digest")), 5)
+        self.assertEqual(summary.digest, 5)
+        self.assertEqual(summary.digest_total, 9)
+        self.assertEqual(summary.relevant, 16)
+        # All 16 evaluated items marked seen (alerts + every digest, capped or not).
+        self.assertEqual(set(store.seen), set(alert_scores) | set(digest_scores))
+
+    def test_author_alert_below_score_is_never_capped(self) -> None:
+        # An author-hit item with a tiny score must still alert (not be treated
+        # as a low-priority digest item the cap could drop). 6 digest + 1 author
+        # alert, cap=5: author always alerts; digest capped to 5.
+        digest_scores = {f"s2:dg{i}": 0.31 + i * 0.03 for i in range(6)}
+        items = [make_item(k.split(":")[1]) for k in digest_scores]
+        author = make_item("auth")
+        items.append(author)
+        table = {k: result(v, keyword=v) for k, v in digest_scores.items()}
+        table["s2:auth"] = result(0.05, keyword=0.05, author=1.0)  # author hit
+        pipe, _, _, notifier = build_pipeline(items, table, digest_cap=5)
+
+        summary = pipe.run(since=None)
+
+        self.assertEqual(notifier.keys("alert"), {"s2:auth"})
+        self.assertEqual(summary.alerts, 1)
+        self.assertEqual(summary.digest, 5)
+        self.assertEqual(summary.digest_total, 6)
+
+    def test_below_cap_is_backward_compatible(self) -> None:
+        # With <= N digest items, every relevant digest item is sent and the
+        # summary's digest == digest_total: identical to pre-cap behaviour.
+        scores = {"s2:d1": 0.40, "s2:d2": 0.50, "s2:a1": 0.80}
+        items = [make_item(k.split(":")[1]) for k in scores]
+        table = {k: result(v, keyword=v) for k, v in scores.items()}
+        pipe, _, store, notifier = build_pipeline(items, table, digest_cap=5)
+
+        summary = pipe.run(since=None)
+
+        self.assertEqual(notifier.keys("digest"), {"s2:d1", "s2:d2"})
+        self.assertEqual(notifier.keys("alert"), {"s2:a1"})
+        self.assertEqual(summary.digest, 2)
+        self.assertEqual(summary.digest_total, 2)   # no cap effect
+        self.assertEqual(set(store.seen), set(scores))
+
+    def test_exactly_n_digest_all_sent(self) -> None:
+        # Boundary: digest size == cap -> all sent, no drop (cap is inclusive).
+        scores = {f"s2:d{i}": 0.30 + i * 0.05 for i in range(5)}
+        items = [make_item(k.split(":")[1]) for k in scores]
+        table = {k: result(v, keyword=v) for k, v in scores.items()}
+        pipe, _, _, notifier = build_pipeline(items, table, digest_cap=5)
+
+        summary = pipe.run(since=None)
+        self.assertEqual(notifier.keys("digest"), set(scores))
+        self.assertEqual(summary.digest, 5)
+        self.assertEqual(summary.digest_total, 5)
+
+    def test_non_positive_cap_means_unlimited(self) -> None:
+        # digest_cap <= 0 is the "no cap" sentinel: every digest item is sent
+        # (must NOT be read as ordered[:0] -> empty).
+        scores = {f"s2:d{i}": 0.30 + i * 0.03 for i in range(8)}
+        items = [make_item(k.split(":")[1]) for k in scores]
+        table = {k: result(v, keyword=v) for k, v in scores.items()}
+        for cap in (0, -1):
+            pipe, _, _, notifier = build_pipeline(items, table, digest_cap=cap)
+            summary = pipe.run(since=None)
+            self.assertEqual(notifier.keys("digest"), set(scores), f"cap={cap}")
+            self.assertEqual(summary.digest, 8, f"cap={cap}")
+            self.assertEqual(summary.digest_total, 8, f"cap={cap}")
 
 
 if __name__ == "__main__":

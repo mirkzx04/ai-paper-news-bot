@@ -113,6 +113,11 @@ thresholds:
   digest: 0.30      # ~2 keyword nel titolo
   alert: 0.60       # match forte (keyword+embedding) o autore seguito
 
+# Numero massimo di paper "digest" per invio (top-N per score). Gli ALERT (autori
+# seguiti) NON sono mai cappati. La FREQUENZA d'invio (2x_daily/daily/weekly) è una
+# preferenza utente — default 2x_daily — modificabile dal bot con /set_frequency.
+digest_cap: 5
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Feedback loop 👍/👎 (inline button sotto ogni paper). I voti diventano seed
 # DINAMICI nel solo canale embedding: 👍 = nuovo centro d'interesse, 👎 = penalità

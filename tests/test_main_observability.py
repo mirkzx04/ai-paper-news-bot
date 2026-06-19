@@ -22,8 +22,10 @@ from src.pipeline import RunSummary  # noqa: E402
 
 
 def _summary(**overrides) -> RunSummary:
+    # digest_total mirrors digest by default (no cap effect when both are 0);
+    # added so the extended RunSummary contract constructs cleanly here too.
     base = dict(fetched=0, unique=0, fresh=0, relevant=0,
-                alerts=0, digest=0, scoring_errors=0)
+                alerts=0, digest=0, digest_total=0, scoring_errors=0)
     base.update(overrides)
     return RunSummary(**base)
 

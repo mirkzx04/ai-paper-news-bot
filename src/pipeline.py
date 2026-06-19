@@ -40,8 +40,9 @@ class RunSummary:
     unique: int           # after cross-source dedup
     fresh: int            # after filter_unseen (not processed in a prior run)
     relevant: int         # cleared the relevance/author bar
-    alerts: int           # routed to instant alert
-    digest: int           # routed to digest
+    alerts: int           # routed to instant alert (never capped)
+    digest: int           # digest items actually SENT (after the top-N cap)
+    digest_total: int     # relevant digest items BEFORE the cap; >= digest
     scoring_errors: int   # items skipped because the scorer raised
 
 
@@ -54,6 +55,7 @@ class Pipeline:
         notifier: Notifier,
         profile: UserProfile,
         thresholds: Thresholds,
+        digest_cap: int = 5,
     ) -> None:
         self.sources = sources
         self.scorer = scorer
@@ -61,6 +63,10 @@ class Pipeline:
         self.notifier = notifier
         self.profile = profile
         self.thresholds = thresholds
+        # Max digest items per run. Alerts are NEVER capped (a followed author is
+        # always notified); the cap applies only to the digest group. A value
+        # <= 0 (or larger than the digest size) means "no effective cap".
+        self.digest_cap = digest_cap
 
     def run(self, since: datetime | None, *, mark_seen: bool = True) -> RunSummary:
         raw = self._fetch_all(since)
@@ -73,14 +79,28 @@ class Pipeline:
         relevant = [s for s in scored if self._is_relevant(s)]
         alerts = [s for s in relevant if self._is_alert(s)]
         digest = [s for s in relevant if s not in alerts]
-        logger.info("relevant=%d alerts=%d digest=%d", len(relevant), len(alerts), len(digest))
+
+        # Cap the DIGEST (only) to the top-N by score, so a quiet day's signal
+        # isn't drowned by a flood of marginally-relevant papers. Alerts are
+        # deliberately left untouched above: a followed author is always
+        # notified — that promise must never be capped.
+        digest_top = self._cap_digest(digest)
+        logger.info(
+            "relevant=%d alerts=%d digest=%d/%d",
+            len(relevant), len(alerts), len(digest_top), len(digest),
+        )
 
         self.notifier.notify(alerts, kind="alert")
-        self.notifier.notify(digest, kind="digest")
+        self.notifier.notify(digest_top, kind="digest")
 
         if mark_seen:
             now = datetime.now(timezone.utc)
-            for s in scored:  # mark everything evaluated, relevant or not
+            # Mark EVERY evaluated item, including digest papers dropped by the
+            # top-N cap: they were scored and consciously deprioritised, not
+            # missed, so re-surfacing them next run would just re-litigate the
+            # same losing comparison. Alerts and relevant-but-low items are
+            # marked too, exactly as before.
+            for s in scored:
                 self.store.mark_seen(s.item.canonical_key, now)
 
         return RunSummary(
@@ -89,7 +109,8 @@ class Pipeline:
             fresh=len(fresh),
             relevant=len(relevant),
             alerts=len(alerts),
-            digest=len(digest),
+            digest=len(digest_top),     # actually sent (post-cap)
+            digest_total=len(digest),   # relevant digest items (pre-cap)
             scoring_errors=scoring_errors,
         )
 
@@ -118,6 +139,30 @@ class Pipeline:
             except Exception as exc:  # one bad source must not sink the run
                 logger.warning("source %s failed: %s", source.name, exc)
         return items
+
+    def _cap_digest(self, digest: list[ScoredItem]) -> list[ScoredItem]:
+        """Return the top-`digest_cap` digest items by descending score.
+
+        Edge cases, all treated as "no effective cap" (return all, still sorted
+        so callers get a stable, score-ordered list either way):
+          - `digest_cap <= 0`: an explicit "unlimited" sentinel from config.
+          - `digest_cap >= len(digest)`: the cap is wider than the group, so the
+            slice is a no-op. This is the backward-compatible path: with a cap
+            at or above the digest size, every relevant digest item is sent, as
+            before. (Ordering by score is new, but the SET sent is unchanged.)
+
+        Ties on `result.total` keep `digest`'s incoming order (Python's sort is
+        stable); the input order is the source/fetch order, so this is
+        deterministic given the same inputs.
+        """
+        ordered = sorted(digest, key=lambda s: s.result.total, reverse=True)
+        # Guard the slice: `digest_cap <= 0` is the "unlimited" sentinel, but a
+        # raw `ordered[:digest_cap]` with a non-positive cap would wrongly drop
+        # items (e.g. [:0] -> [], [:-1] -> all-but-last). Skip slicing in that
+        # case (and when the cap already covers the whole group) -> send all.
+        if self.digest_cap <= 0 or self.digest_cap >= len(ordered):
+            return ordered
+        return ordered[: self.digest_cap]
 
     def _is_relevant(self, s: ScoredItem) -> bool:
         return s.result.total >= self.thresholds.digest or _author_hit(s)
