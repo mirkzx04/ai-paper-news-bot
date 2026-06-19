@@ -91,6 +91,8 @@ _ADMIN_MAX_N = 50
 # unbounded fields.
 _REPORT_BODY_MAX_CHARS = 600
 _ERROR_TRACEBACK_MAX_CHARS = 500
+_ERROR_TEXT_MAX_CHARS = 500
+_ADMIN_MESSAGE_BUDGET = 3900
 # How many of the newest errors to inline in the end-of-run push notification.
 _PUSH_ERROR_PREVIEW = 2
 
@@ -478,17 +480,25 @@ class TelegramPoller:
 
         Each record shows timestamp, command, and error; the traceback is tail-
         truncated to the last `_ERROR_TRACEBACK_MAX_CHARS` chars (the bottom of a
-        traceback — the actual exception — is the useful part).
+        traceback — the actual exception — is the useful part). The full reply is
+        also capped below Telegram's 4096-char limit; if many records are huge, we
+        keep the newest records and omit older ones.
         """
         records = self.error_log.recent(n)
         if not records:
             return "✅ No errors logged."
         total = self.error_log.count()
-        lines = [f"⚠️ <b>Errors</b> — showing {len(records)} of {total}"]
-        for rec in records:
+        header = f"⚠️ <b>Errors</b> — showing {{shown}} of {total}"
+        blocks: list[str] = []
+        used = len(header.format(shown=len(records)))
+        omitted = 0
+        for rec in reversed(records):
             ts = html.escape(str(rec.get("timestamp", "?")))
             cmd = html.escape(str(rec.get("command", "?")))
-            err = html.escape(str(rec.get("error", "")))
+            err_raw = str(rec.get("error", ""))
+            if len(err_raw) > _ERROR_TEXT_MAX_CHARS:
+                err_raw = err_raw[:_ERROR_TEXT_MAX_CHARS].rstrip() + "…"
+            err = html.escape(err_raw)
             block = [f"\n🕒 <i>{ts}</i>  <code>{cmd}</code>", err]
             tb = rec.get("traceback")
             if tb:
@@ -497,7 +507,19 @@ class TelegramPoller:
                     # Keep the TAIL: the last frames + the exception line.
                     tb = "…" + tb[-_ERROR_TRACEBACK_MAX_CHARS:]
                 block.append(f"<pre>{html.escape(tb)}</pre>")
-            lines.append("\n".join(block))
+            rendered = "\n".join(block)
+            # +1 for the newline join; leave a little room for an omission note.
+            if used + len(rendered) + 80 > _ADMIN_MESSAGE_BUDGET:
+                omitted += 1
+                continue
+            blocks.append(rendered)
+            used += len(rendered) + 1
+        blocks.reverse()
+        shown = len(blocks)
+        lines = [header.format(shown=shown)]
+        lines.extend(blocks)
+        if omitted:
+            lines.append(f"\n…{omitted} older error(s) omitted to fit Telegram limits.")
         return "\n".join(lines)
 
     # ----------------------------------------------------- end-of-run notify --

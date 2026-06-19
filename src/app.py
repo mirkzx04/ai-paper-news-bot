@@ -268,10 +268,12 @@ def build_poller(token, store, profile_store, preference_dataset, *,
     ``report_log``, ``sent_items`` and ``preference_dataset`` are injected so the
     caller owns their lifecycle (e.g. closing ``sent_items``).
     """
-    dispatcher = CommandDispatcher(build_commands(), profile_store)
+    error_log = ErrorLog()
+    dispatcher = CommandDispatcher(build_commands(), profile_store, error_log=error_log)
     return TelegramPoller(token, dispatcher, store, flow=flow,
-                          report_log=report_log, admin_chat_id=admin_chat_id,
-                          preference_dataset=preference_dataset, sent_items=sent_items)
+                          error_log=error_log, report_log=report_log,
+                          admin_chat_id=admin_chat_id, preference_dataset=preference_dataset,
+                          sent_items=sent_items)
 
 
 def run_digest_once(cfg, store, profile_store, preference_dataset, *,
@@ -320,14 +322,6 @@ def run_digest_once(cfg, store, profile_store, preference_dataset, *,
     else:
         since = now - timedelta(days=int(cfg.sources.get("arxiv", {}).get("lookback_days", 2)))
 
-    field_classifier = FieldClassifier(cfg.topics)
-    # Record each sent paper so its 👍/👎 vote (arriving on a later run) resolves
-    # back to it. Only the Telegram notifier needs it; shares data/bot.db.
-    sent_items = SentItemsStore(_store_db_path(store)) if notifier_kind == "telegram" else None
-    notifier = build_notifier(notifier_kind, field_classifier,
-                              sent_items=sent_items, preference_dataset=preference_dataset)
-    pipeline = build_pipeline(cfg, store, notifier)
-
     # Observability (telegram mode only): the cron is unattended, so a crash
     # must land somewhere visible. On failure we persist the full traceback to
     # ErrorLog (so `/errors` sees it), push a concise alert to the owner, and
@@ -337,13 +331,23 @@ def run_digest_once(cfg, store, profile_store, preference_dataset, *,
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
     is_telegram = notifier_kind == "telegram"
+    sent_items = None
     try:
+        field_classifier = FieldClassifier(cfg.topics)
+        # Record each sent paper so its 👍/👎 vote (arriving on a later run) resolves
+        # back to it. Only the Telegram notifier needs it; shares data/bot.db.
+        sent_items = SentItemsStore(_store_db_path(store)) if is_telegram else None
+        notifier = build_notifier(notifier_kind, field_classifier,
+                                  sent_items=sent_items, preference_dataset=preference_dataset)
+        pipeline = build_pipeline(cfg, store, notifier)
         summary = pipeline.run(since, mark_seen=not dry_run)
         if not dry_run:
             store.set_meta(_LAST_DIGEST_KEY, now.isoformat())
         if is_telegram and chat_id:
             _admin_push(token, chat_id, _heartbeat_text(summary))
         return summary
+    except MissingCredentialsError:
+        raise
     except Exception as exc:
         ErrorLog().record(
             command="<digest>",

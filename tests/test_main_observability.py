@@ -70,5 +70,21 @@ class AdminPushTest(unittest.TestCase):
                 self.fail(f"_admin_push must never raise, got {exc!r}")
 
 
+class WorkflowObservabilityEnvTest(unittest.TestCase):
+    def test_command_poll_step_has_admin_chat_id_for_owner_logs(self) -> None:
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        workflow = os.path.join(root, ".github", "workflows", "bot.yml")
+        with open(workflow, "r", encoding="utf-8") as fh:
+            text = fh.read()
+
+        marker = "- name: Process incoming commands"
+        self.assertIn(marker, text)
+        command_step = text.split(marker, 1)[1].split(
+            "- name: Fetch papers and send digest", 1)[0]
+        # /reports, /errors, and the end-of-run error push are owner-only; without
+        # the chat id this online step processes commands but cannot inspect logs.
+        self.assertIn("TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}", command_step)
+
+
 if __name__ == "__main__":
     unittest.main()

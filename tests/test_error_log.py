@@ -79,14 +79,51 @@ class ErrorLogReaderTest(unittest.TestCase):
         self.assertEqual(latest["error"], "bang")
         self.assertIsNone(latest["traceback"])
 
+    def test_record_writes_append_only_jsonl(self) -> None:
+        log = ErrorLog(self.path)
+        log.record(command="/a", args="x", error="boom")
+        log.record(command="/b", args="y", error="bang")
+
+        with open(self.path, "r", encoding="utf-8") as fh:
+            lines = [json.loads(line) for line in fh if line.strip()]
+
+        self.assertEqual([line["command"] for line in lines], ["/a", "/b"])
+
     def test_record_over_corrupt_file_starts_fresh(self) -> None:
         with open(self.path, "w", encoding="utf-8") as fh:
             fh.write("garbage, not json")
         log = ErrorLog(self.path)
         log.record(command="/a", args="", error="e")
-        # The corrupt content is discarded; the new record is the only one.
+        # The corrupt line is ignored; the appended record is still readable.
         self.assertEqual(log.count(), 1)
         self.assertEqual(log.recent(1)[0]["command"], "/a")
+
+    def test_corrupt_jsonl_line_does_not_hide_later_records(self) -> None:
+        with open(self.path, "w", encoding="utf-8") as fh:
+            fh.write("not-json\n")
+            fh.write(json.dumps({"timestamp": "t1", "command": "/ok",
+                                 "args": "", "error": "e", "traceback": None}) + "\n")
+        log = ErrorLog(self.path)
+        self.assertEqual(log.count(), 1)
+        self.assertEqual(log.recent(1)[0]["command"], "/ok")
+
+    def test_default_reader_includes_legacy_json_history(self) -> None:
+        old_cwd = os.getcwd()
+        os.chdir(self._tmp.name)
+        try:
+            os.makedirs("data")
+            with open(os.path.join("data", "error_log.json"), "w", encoding="utf-8") as fh:
+                json.dump([{"timestamp": "t0", "command": "/old", "args": "",
+                            "error": "old", "traceback": None}], fh)
+
+            log = ErrorLog()
+            log.record(command="/new", args="", error="new")
+
+            self.assertEqual(log.count(), 2)
+            self.assertEqual([rec["command"] for rec in log.recent(2)], ["/old", "/new"])
+            self.assertTrue(os.path.exists(os.path.join("data", "error_log.jsonl")))
+        finally:
+            os.chdir(old_cwd)
 
 
 if __name__ == "__main__":

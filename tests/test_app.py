@@ -282,6 +282,65 @@ class RunDigestOnceFailureTest(unittest.TestCase):
         self.assertNotIsInstance(ctx.exception, app.MissingCredentialsError)
         error_log.return_value.record.assert_called_once()
 
+    def test_build_pipeline_failure_is_recorded_and_closes_sent_items(self) -> None:
+        env = {"TELEGRAM_BOT_TOKEN": "TKN", "TELEGRAM_CHAT_ID": "42"}
+        profile_store = FakeProfileStore("2x_daily")
+        with tempfile.TemporaryDirectory() as tmp:
+            db = os.path.join(tmp, "bot.db")
+            store = FakeStore(db_path=db)
+            sent_items = mock.Mock()
+            with mock.patch.dict(os.environ, env, clear=True), \
+                 mock.patch.object(app, "SentItemsStore", return_value=sent_items), \
+                 mock.patch.object(app, "build_notifier", return_value=object()), \
+                 mock.patch.object(app, "build_pipeline",
+                                   side_effect=RuntimeError("build failed")), \
+                 mock.patch.object(app, "ErrorLog") as error_log, \
+                 mock.patch.object(app, "send_message"):
+                with self.assertRaises(RuntimeError):
+                    app.run_digest_once(
+                        _cfg(), store, profile_store, None,
+                        notifier_kind="telegram", lookback_override=None,
+                        dry_run=False, now=_NOW,
+                    )
+
+            error_log.return_value.record.assert_called_once()
+            sent_items.close.assert_called_once()
+            store.conn.close()
+
+    def test_missing_credentials_are_not_recorded_as_runtime_errors(self) -> None:
+        profile_store = FakeProfileStore("2x_daily")
+        with tempfile.TemporaryDirectory() as tmp:
+            db = os.path.join(tmp, "bot.db")
+            store = FakeStore(db_path=db)
+            sent_items = mock.Mock()
+            with mock.patch.dict(os.environ, {}, clear=True), \
+                 mock.patch.object(app, "SentItemsStore", return_value=sent_items), \
+                 mock.patch.object(app, "ErrorLog") as error_log:
+                with self.assertRaises(app.MissingCredentialsError):
+                    app.run_digest_once(
+                        _cfg(), store, profile_store, None,
+                        notifier_kind="telegram", lookback_override=None,
+                        dry_run=False, now=_NOW,
+                    )
+
+            error_log.assert_not_called()
+            sent_items.close.assert_called_once()
+            store.conn.close()
+
+
+class BuildPollerTest(unittest.TestCase):
+    def test_dispatcher_and_poller_share_one_error_log(self) -> None:
+        error_log = mock.Mock()
+        error_log.count.return_value = 0
+        with mock.patch.object(app, "ErrorLog", return_value=error_log):
+            poller = app.build_poller(
+                "TOKEN", FakeStore(), object(), object(),
+                admin_chat_id="42", report_log=object(), sent_items=object(), flow=object(),
+            )
+
+        self.assertIs(poller.error_log, error_log)
+        self.assertIs(poller.dispatcher.error_log, error_log)
+
 
 class BuildNotifierTest(unittest.TestCase):
     def test_raises_value_error_without_telegram_credentials(self) -> None:

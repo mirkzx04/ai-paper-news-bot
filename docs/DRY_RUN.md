@@ -192,7 +192,8 @@ the bot process and reply (each `--poll-commands` drains the queue once).
   the run at a bad arXiv config so the fetch throws, e.g. temporarily break
   `sources.arxiv` in `config/profile.yaml`, or run with an unreachable network.
   On failure the bot:
-  1. records the full traceback to `data/error_log.json` (`main.py:284-289`),
+  1. records the full traceback to `data/error_log.jsonl` (`main.py:284-289`;
+     old `data/error_log.json` history is still read by `/errors`),
   2. pushes you `⚠️ digest run failed: <ErrorType>: <first line>`
      (`main.py:290-293`),
   3. re-raises (non-zero exit; in CI this also emails you) (`main.py:294`).
@@ -244,7 +245,7 @@ which is out of scope for the current MVP.
 | --- | --- |
 | Live trace of what the bot did | console output of any `-v` run |
 | Recorded votes / impressions / profile edits | `data/preferences.jsonl` |
-| Recorded runtime errors (also via `/errors`) | `data/error_log.json` |
+| Recorded runtime errors (also via `/errors`) | `data/error_log.jsonl` |
 | Saved user reports (also via `/reports`) | `data/reports.json` |
 | Telegram update offset / seen-ids | `data/bot.db` |
 | Current profile additions | `data/profile_overlay.json` |
@@ -254,7 +255,7 @@ which is out of scope for the current MVP.
 ## 5. Reset note (optional)
 
 A local dry run leaves real votes/impressions in `data/preferences.jsonl` and a
-real error in `data/error_log.json`. If you don't want the test data to flow into
+real error in `data/error_log.jsonl`. If you don't want the test data to flow into
 the actual recommender, back up and clear those files (or run the whole test from a
 throwaway copy of `data/`) before going live. The vote events do feed the embedding
 loop — but the loop is heavily down-weighted, so a handful of test votes barely

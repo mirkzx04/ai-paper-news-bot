@@ -18,6 +18,9 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src import telegram_poller as tp_mod  # noqa: E402
+from src.commands.base import Command  # noqa: E402
+from src.commands.dispatch import CommandDispatcher  # noqa: E402
+from src.commands.report import ReportCommand  # noqa: E402
 from src.error_log import ErrorLog  # noqa: E402
 from src.report_log import ReportLog  # noqa: E402
 from src.telegram_poller import TelegramPoller  # noqa: E402
@@ -254,6 +257,24 @@ class AdminNParsingTest(PollerAdminBase):
         self.assertIn("FinalError: boom", text)
         self.assertLess(len(text), 4096)  # safely under Telegram's limit
 
+    def test_errors_reply_stays_under_telegram_limit_with_many_long_errors(self) -> None:
+        for i in range(60):
+            self.error_log.record(
+                command=f"/c{i}",
+                args="",
+                error=f"err-{i}-" + ("E" * 1200),
+                traceback_str=("T" * 5000) + f"\nFinalError: {i}",
+            )
+        poller = self._make_poller()
+        self._updates = [_make_update(1, ADMIN, "/errors 50")]
+
+        poller.poll_once()
+
+        text = self.sent[0]["text"]
+        self.assertLess(len(text), 4096)
+        self.assertIn("err-59-", text)  # newest record survives the budget cap
+        self.assertIn("omitted", text)
+
 
 class NewErrorsThisRunTest(PollerAdminBase):
     def test_baseline_excludes_preexisting_errors(self) -> None:
@@ -302,6 +323,71 @@ class NewErrorsThisRunTest(PollerAdminBase):
         self.assertIn("5 error", summary)
         # Only _PUSH_ERROR_PREVIEW newest are inlined; the rest are summarized.
         self.assertIn("and 3 more", summary)
+
+
+class _BoomCommand(Command):
+    name = "boom"
+    description = "Raise a test error"
+
+    def handle(self, args, store):
+        raise RuntimeError(f"boom: {args}")
+
+
+class OnlineLogPathIntegrationTest(PollerAdminBase):
+    def test_report_command_and_admin_reports_share_default_persistent_file(self) -> None:
+        old_cwd = os.getcwd()
+        os.chdir(self._tmp.name)
+        try:
+            dispatcher = CommandDispatcher([ReportCommand()], store=object())
+            poller = TelegramPoller(
+                token="T",
+                dispatcher=dispatcher,
+                store=_FakeStore(),
+                flow=None,
+                admin_chat_id=ADMIN,
+            )
+            self._updates = [
+                _make_update(1, ADMIN, "/report venue field was wrong"),
+                _make_update(2, ADMIN, "/reports"),
+            ]
+
+            poller.poll_once()
+
+            self.assertEqual(len(self.sent), 2)
+            self.assertIn("received and saved", self.sent[0]["text"])
+            self.assertEqual(self.sent[1]["parse_mode"], "HTML")
+            self.assertIn("venue field was wrong", self.sent[1]["text"])
+            self.assertTrue(os.path.exists(os.path.join("data", "reports.json")))
+        finally:
+            os.chdir(old_cwd)
+
+    def test_command_failure_and_admin_errors_share_default_persistent_file(self) -> None:
+        old_cwd = os.getcwd()
+        os.chdir(self._tmp.name)
+        try:
+            dispatcher = CommandDispatcher([_BoomCommand()], store=object())
+            poller = TelegramPoller(
+                token="T",
+                dispatcher=dispatcher,
+                store=_FakeStore(),
+                flow=None,
+                admin_chat_id=ADMIN,
+            )
+            self._updates = [
+                _make_update(1, ADMIN, "/boom arg"),
+                _make_update(2, ADMIN, "/errors"),
+            ]
+
+            poller.poll_once()
+
+            self.assertEqual(len(self.sent), 2)
+            self.assertEqual(self.sent[0]["text"], "Command execution failed")
+            self.assertEqual(self.sent[1]["parse_mode"], "HTML")
+            self.assertIn("/boom", self.sent[1]["text"])
+            self.assertIn("boom: arg", self.sent[1]["text"])
+            self.assertTrue(os.path.exists(os.path.join("data", "error_log.jsonl")))
+        finally:
+            os.chdir(old_cwd)
 
 
 if __name__ == "__main__":

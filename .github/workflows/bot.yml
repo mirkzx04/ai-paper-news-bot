@@ -49,6 +49,7 @@ jobs:
       - name: Process incoming commands
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python main.py --poll-commands -v
 
       - name: Fetch papers and send digest
