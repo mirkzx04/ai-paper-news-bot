@@ -68,6 +68,11 @@ class ProfileFlow:
             return None
 
         step = self.active_step(chat_id)
+        # A slash-command mid-onboarding (/start, /help, ...) is NOT step input:
+        # hand it to the dispatcher and keep the flow on the same step, so a stray
+        # command can't pollute the profile (e.g. "/start" saved as an author/keyword).
+        if step and command:
+            return None
         if step == "papers":
             reply = handle_papers(stripped, self.profile_store, self.resolver)
             self.store.set_meta(self._key(chat_id), "authors")

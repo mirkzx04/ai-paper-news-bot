@@ -93,3 +93,25 @@ python main.py --register-menu             # register the slash-command menu
 python main.py --poll-commands -v          # process incoming commands + 👍/👎 votes
 python main.py --notifier telegram -v      # send matched papers (with vote buttons)
 ```
+
+## Deploy (GitHub Actions)
+
+The repo is public, so runtime state can't live on a branch: `tools/state_store.py`
+tars `data/` to base64 and stores it as `state.b64` in a **private gist**. The
+`.github/workflows/bot.yml` workflow runs on cron `0 7,19 * * *` (twice a day,
+07:00 & 19:00 UTC) plus `workflow_dispatch`, and each run does: pull state from the
+gist → `--register-menu` → `--poll-commands` → `--notifier telegram` → push state
+back (the push runs `if: always()`).
+
+To deploy from scratch:
+
+1. **Create a private gist** with a placeholder file `state.b64` (any content,
+   e.g. `init`). Copy the gist id from its URL → `GIST_ID`.
+2. **Create a Personal Access Token** with the `gist` scope → `GIST_TOKEN`.
+3. **Set the GitHub Actions Secrets** (repo *Settings → Secrets and variables →
+   Actions*): `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `GIST_ID`, `GIST_TOKEN`
+   (plus the optional `SEMANTIC_SCHOLAR_API_KEY`).
+4. The workflow then runs **twice a day**; trigger it on demand from the *Actions*
+   tab with **Run workflow** (`workflow_dispatch`).
+5. **Before trusting the cron, validate end-to-end:** follow the runbook in
+   [`docs/DRY_RUN.md`](docs/DRY_RUN.md) for a real dry-run test.

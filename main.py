@@ -10,6 +10,7 @@ import argparse
 import json
 import logging
 import os
+import traceback
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
@@ -29,11 +30,12 @@ from src.embedding.profile_vector import load_or_build
 from src.embedding.specter import SpecterEmbedder
 from src.enrich.semantic_scholar import resolve_author_ids
 from src.env import load_env
+from src.error_log import ErrorLog
 from src.flow.profile_flow import ProfileFlow
 from src.notify.base import Notifier
 from src.notify.console_notifier import ConsoleNotifier
 from src.notify.telegram_notifier import TelegramNotifier
-from src.pipeline import Pipeline
+from src.pipeline import Pipeline, RunSummary
 from src.report_log import ReportLog
 from src.scoring.author_scorer import AuthorScorer
 from src.scoring.combined import CombinedScorer
@@ -45,10 +47,37 @@ from src.store.preference_dataset import PreferenceDataset, ProfileListener
 from src.store.profile_store import ProfileStore
 from src.store.sent_items_store import SentItemsStore
 from src.store.sqlite_store import SqliteStore
-from src.telegram_api import set_my_commands
+from src.telegram_api import send_message, set_my_commands
 from src.telegram_poller import TelegramPoller
 
 logger = logging.getLogger("main")
+
+
+def _admin_push(token: str, chat_id, text: str) -> None:
+    """Best-effort one-off push to the bot owner (admin) in digest mode.
+
+    Used for the failure alert and the success heartbeat. Deliberately
+    exception-proof: a push is observability, not the job — a network blip,
+    a 4xx, or a malformed response must never mask the pipeline's own error
+    nor block resource cleanup. Any failure is logged and swallowed.
+    """
+    try:
+        send_message(token, chat_id, text)
+    except Exception as exc:  # noqa: BLE001 - an admin push must never crash the run
+        logger.warning("admin push failed: %s", exc)
+
+
+def _heartbeat_text(summary: RunSummary) -> str:
+    """One-line end-of-run heartbeat from a RunSummary (duck-typed on its fields).
+
+    Lets the owner see the cron is alive, how many papers moved, and the
+    scoring-error count even when those errors weren't fatal. Pure formatting,
+    so it's testable without running the pipeline.
+    """
+    return (
+        f"✅ digest: {summary.alerts} alert + {summary.digest} digest inviati"
+        f" · {summary.fresh} nuovi · {summary.scoring_errors} scoring-error"
+    )
 
 
 def build_commands() -> list:
@@ -238,8 +267,31 @@ def main() -> None:
         lookback = int(cfg.sources.get("arxiv", {}).get("lookback_days", 2))
     since = datetime.now(timezone.utc) - timedelta(days=lookback)
 
+    # Observability (telegram mode only): the cron is unattended, so a crash
+    # must land somewhere visible. On failure we persist the full traceback to
+    # ErrorLog (so `/errors` sees it), push a concise alert to the owner, and
+    # re-raise so the GitHub workflow fails (email) — the gist state step runs
+    # `if: always()`. On success we push a one-line heartbeat with the counts.
+    # In console mode there is no admin to push to, so behaviour is unchanged.
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    is_telegram = args.notifier == "telegram"
     try:
-        pipeline.run(since, mark_seen=not args.dry_run)
+        summary = pipeline.run(since, mark_seen=not args.dry_run)
+        if is_telegram and chat_id:
+            _admin_push(token, chat_id, _heartbeat_text(summary))
+    except Exception as exc:
+        ErrorLog().record(
+            command="<digest>",
+            args=f"notifier={args.notifier}",
+            error=str(exc),
+            traceback_str=traceback.format_exc(),
+        )
+        if is_telegram and chat_id:
+            first_line = (str(exc) or "").splitlines()[0] if str(exc) else ""
+            _admin_push(token, chat_id,
+                        f"⚠️ digest run failed: {type(exc).__name__}: {first_line}")
+        raise  # surface to the workflow (failed run + email); state saved by gist step
     finally:
         if sent_items is not None:
             sent_items.close()
