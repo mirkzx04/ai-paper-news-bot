@@ -63,6 +63,18 @@ def answer_callback_query(token: str, callback_query_id: str, text: str | None =
 
 def get_updates(token: str, offset: int | None = None, timeout: int = 0,
                 req_timeout: int = 25) -> dict:
+    """GET getUpdates. `timeout` is Telegram's long-poll (seconds): with
+    ``timeout > 0`` the server holds the connection open until an update arrives
+    or `timeout` elapses; ``timeout = 0`` (the default) returns immediately.
+
+    `req_timeout` is the HTTP read timeout handed to `requests`. When long-
+    polling it MUST exceed `timeout`, otherwise `requests` aborts the request
+    before Telegram replies. We defensively clamp it up to ``timeout + 5`` so a
+    caller that forgets (or passes a too-small `req_timeout`) still works; with
+    ``timeout = 0`` this is a no-op and the HTTP timeout is left untouched.
+    """
+    if timeout > 0:
+        req_timeout = max(req_timeout, timeout + 5)
     params: dict = {"timeout": timeout}
     if offset is not None:
         params["offset"] = offset
