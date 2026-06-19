@@ -20,6 +20,36 @@ class ErrorLog:
         # Path of the JSON file holding the list of recorded errors.
         self.path = path
 
+    def _read(self) -> list:
+        """Load the stored error list; return [] on any read/parse problem.
+
+        Tolerates a missing file, corrupt JSON, or a JSON value that is not a
+        list. Never raises — every failure degrades to an empty list.
+        """
+        try:
+            with open(self.path, "r", encoding="utf-8") as fh:
+                loaded = json.load(fh)
+        except (FileNotFoundError, json.JSONDecodeError, OSError, ValueError):
+            return []
+        if not isinstance(loaded, list):
+            return []
+        return loaded
+
+    def recent(self, n: int = 10) -> list:
+        """Return the most recent `n` error records (the file's tail is newest).
+
+        Missing/corrupt file -> []. ``n <= 0`` returns []; ``n`` larger than the
+        log returns every record. Records keep their on-disk shape
+        ``{"timestamp", "command", "args", "error", "traceback"}``. NEVER raises.
+        """
+        if n <= 0:
+            return []
+        return self._read()[-n:]
+
+    def count(self) -> int:
+        """Total number of recorded errors. Missing/corrupt file -> 0. NEVER raises."""
+        return len(self._read())
+
     def record(
         self,
         command: str,
@@ -44,14 +74,7 @@ class ErrorLog:
             # Read the existing content, tolerating any of: missing file,
             # corrupt JSON, or a JSON value that is not a list. In all those
             # cases we start from an empty list and never raise on read.
-            records: list = []
-            try:
-                with open(self.path, "r", encoding="utf-8") as fh:
-                    loaded = json.load(fh)
-                if isinstance(loaded, list):
-                    records = loaded
-            except (FileNotFoundError, json.JSONDecodeError, OSError, ValueError):
-                records = []
+            records: list = self._read()
 
             records.append(record)
 
