@@ -1,0 +1,65 @@
+# systemd unit for the AI Paper News Bot in long-running serve mode.
+#
+# Runs `python main.py --serve`: a single persistent process that long-polls
+# Telegram for commands/votes in real time AND runs the internal digest
+# scheduler (cadence from the user's /set_frequency preference).
+#
+# The bot is a CLIENT toward Telegram (long-poll, no webhook) — it opens NO
+# listening socket, so the host needs NO inbound firewall port for it.
+#
+# ── BEFORE YOU ENABLE THIS — adapt the placeholders below ────────────────────
+#   User=            a NON-root user that owns the install dir         (CHANGE)
+#   WorkingDirectory the repo checkout                                 (CHANGE)
+#   ExecStart        the venv python inside that checkout              (CHANGE)
+#   EnvironmentFile  the local .env (TELEGRAM_BOT_TOKEN, ...)          (CHANGE)
+# Defaults assume the repo lives at /opt/paper-news-bot with its venv in
+# ./.venv and a ./.env file (see docs/DEPLOY_VM.md). After editing:
+#   sudo cp deploy/bot.service /etc/systemd/system/paper-news-bot.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now paper-news-bot
+# ─────────────────────────────────────────────────────────────────────────────
+
+[Unit]
+Description=AI Paper News Telegram bot (serve mode: long-poll + digest scheduler)
+# Start after the network is reachable; the bot only reaches OUT to Telegram.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# --- adapt these four to your machine ---------------------------------------
+User=paperbot
+# Group=paperbot                       # uncomment/set if different from User
+WorkingDirectory=/opt/paper-news-bot
+ExecStart=/opt/paper-news-bot/.venv/bin/python main.py --serve
+EnvironmentFile=/opt/paper-news-bot/.env
+# ----------------------------------------------------------------------------
+
+# Keep it alive: restart on any exit (crash, OOM kill, transient bug) after a
+# short backoff. The serve loop already swallows transient network/HTTP errors
+# internally (see src/telegram_poller.py), so a restart here is the last resort.
+Restart=always
+RestartSec=10
+# Don't enter a tight crash-loop: if it fails >5 times within 60s, give up and
+# leave it failed (a human should look). Clears once it stays up.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# Logs go to the systemd journal — read them with:  journalctl -u paper-news-bot
+# Force unbuffered stdout so log lines appear in the journal immediately.
+Environment=PYTHONUNBUFFERED=1
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=paper-news-bot
+
+# --- light hardening (optional; remove any that fights your setup) ----------
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+# State (data/) lives inside WorkingDirectory; ProtectHome would hide /home, so
+# only enable it if your install dir is NOT under /home.
+# ProtectHome=true
+# ----------------------------------------------------------------------------
+
+[Install]
+WantedBy=multi-user.target

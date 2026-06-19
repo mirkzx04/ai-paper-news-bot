@@ -12,6 +12,8 @@ import html
 import logging
 import traceback
 
+import requests
+
 from src.commands.dispatch import CommandDispatcher
 from src.error_log import ErrorLog
 from src.report_log import ReportLog
@@ -123,13 +125,38 @@ class TelegramPoller:
         # once per cron tick). Snapshot now, before any poll has logged anything.
         self._errors_at_start = self.error_log.count()
 
-    def poll_once(self) -> int:
-        """Fetch and process pending updates. Returns how many replies were sent."""
+    def poll_once(self, long_poll: int = 0) -> int:
+        """Fetch and process pending updates. Returns how many replies were sent.
+
+        `long_poll` (seconds) selects the getUpdates mode. With the default
+        ``0`` the call returns immediately (run-once, GitHub-Actions behaviour —
+        unchanged). With ``long_poll > 0`` it switches to Telegram long-polling:
+        getUpdates blocks server-side for up to `long_poll` seconds waiting for
+        an update, and the HTTP read timeout is set to ``long_poll + 5`` so
+        `requests` outlives the server hold. Everything after the fetch
+        (command/callback/flow dispatch, offset advance, return value) is
+        identical in both modes.
+
+        Defensive: a network/HTTP error from getUpdates (e.g. the long-poll read
+        timing out, or a connection drop) is swallowed and reported as 0 updates
+        processed, so a transient failure can never break the long-running serve
+        loop — the next tick simply retries from the same offset.
+        """
         raw_offset = self.store.get_meta(_OFFSET_KEY)
         offset = int(raw_offset) if raw_offset else None
 
-        data = get_updates(self.token, offset=offset, timeout=0,
-                           req_timeout=self.timeout + 5)
+        # timeout=0 => immediate return (run-once); timeout=long_poll => block up
+        # to long_poll s. req_timeout always outlives the server hold (get_updates
+        # also clamps this, but we set it explicitly to keep both paths obvious).
+        req_timeout = (long_poll + 5) if long_poll > 0 else (self.timeout + 5)
+        try:
+            data = get_updates(self.token, offset=offset, timeout=long_poll,
+                               req_timeout=req_timeout)
+        except requests.RequestException as exc:
+            # A long-poll naturally times out with no updates; treat any transport
+            # error as "nothing to process" so the serve loop keeps going.
+            logger.warning("getUpdates request error: %s", exc)
+            return 0
         if not data.get("ok"):
             logger.warning("getUpdates failed: %s", data)
             return 0
