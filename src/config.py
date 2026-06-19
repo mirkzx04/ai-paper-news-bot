@@ -11,12 +11,30 @@ from src.pipeline import Thresholds
 from src.store.profile_store import ProfileStore
 
 
+@dataclass(frozen=True)
+class FeedbackConfig:
+    """Parameters of the 👍/👎 feedback loop (embedding channel only).
+
+    Votes become dynamic seeds: 👍 a positive center of interest, 👎 a soft
+    margined penalty. Anchored below the onboarding seeds (w_pos_max < 1) and
+    cold-started so a few votes barely move the ranking. With no votes the
+    embedding scorer is identical to Phase 2.
+    """
+    w_pos_max: float = 0.6
+    neg_lambda: float = 0.5
+    baseline_neg: float = 0.80
+    tau_days: float = 120.0
+    coldstart_k: int = 5
+    cap_m: int = 50
+
+
 @dataclass
 class AppConfig:
     profile: UserProfile
     thresholds: Thresholds
     sources: dict = field(default_factory=dict)
     topics: dict = field(default_factory=dict)
+    feedback: FeedbackConfig = field(default_factory=FeedbackConfig)
 
 
 def load_config(path: str) -> AppConfig:
@@ -43,11 +61,21 @@ def load_config(path: str) -> AppConfig:
         digest=float(thr_raw.get("digest", 0.30)),
         alert=float(thr_raw.get("alert", 0.60)),
     )
+    fb_raw = raw.get("feedback", {}) or {}
+    feedback = FeedbackConfig(
+        w_pos_max=float(fb_raw.get("w_pos_max", 0.6)),
+        neg_lambda=float(fb_raw.get("neg_lambda", 0.5)),
+        baseline_neg=float(fb_raw.get("baseline_neg", 0.80)),
+        tau_days=float(fb_raw.get("tau_days", 120.0)),
+        coldstart_k=int(fb_raw.get("coldstart_k", 5)),
+        cap_m=int(fb_raw.get("cap_m", 50)),
+    )
     return AppConfig(
         profile=profile,
         thresholds=thresholds,
         sources=raw.get("sources", {}) or {},
         topics=raw.get("topics", {}) or {},
+        feedback=feedback,
     )
 
 

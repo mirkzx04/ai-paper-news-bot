@@ -2,18 +2,63 @@
 
 from __future__ import annotations
 
+import json
+import logging
+
 import requests
+
+logger = logging.getLogger(__name__)
 
 _BASE = "https://api.telegram.org/bot{token}/{method}"
 
 
 def send_message(token: str, chat_id, text: str, parse_mode: str | None = None,
+                 reply_markup: dict | None = None,
                  timeout: int = 20) -> requests.Response:
+    """POST sendMessage. Returns the raw `requests.Response`.
+
+    `reply_markup` (optional) is any Telegram reply-markup object — e.g. an
+    inline keyboard ``{"inline_keyboard": [[...]]}`` for the 👍/👎 feedback
+    buttons. It is JSON-serialised into the form field as the Bot API requires;
+    omitting it leaves the payload byte-for-byte identical to before, so every
+    existing caller is unaffected. The caller can read ``resp.json()["result"]
+    ["message_id"]`` from the return value when it needs the sent message id.
+    """
     payload: dict = {"chat_id": chat_id, "text": text}
     if parse_mode:
         payload["parse_mode"] = parse_mode
+    if reply_markup is not None:
+        payload["reply_markup"] = json.dumps(reply_markup)
     return requests.post(_BASE.format(token=token, method="sendMessage"),
                          json=payload, timeout=timeout)
+
+
+def answer_callback_query(token: str, callback_query_id: str, text: str | None = None,
+                          timeout: int = 10) -> bool:
+    """Best-effort answerCallbackQuery — stops the client's loading spinner.
+
+    Telegram requires every ``callback_query`` to be answered; until then the
+    inline button shows a spinner on the user's side. `text` is an optional
+    toast shown briefly to the user (e.g. "👍 registrato").
+
+    Never raises: a feedback ack failing must not break the poll loop. Returns
+    True only on a confirmed ``ok`` from the API, False otherwise.
+    """
+    payload: dict = {"callback_query_id": callback_query_id}
+    if text is not None:
+        payload["text"] = text
+    try:
+        resp = requests.post(_BASE.format(token=token, method="answerCallbackQuery"),
+                             json=payload, timeout=timeout)
+    except requests.RequestException as exc:
+        logger.warning("answerCallbackQuery error: %s", exc)
+        return False
+    if resp.status_code != 200:
+        return False
+    try:
+        return bool(resp.json().get("ok"))
+    except ValueError:
+        return False
 
 
 def get_updates(token: str, offset: int | None = None, timeout: int = 0,
@@ -42,6 +87,37 @@ def delete_message(token: str, chat_id, message_id: int, timeout: int = 10) -> b
         resp = requests.post(_BASE.format(token=token, method="deleteMessage"),
                              json={"chat_id": chat_id, "message_id": message_id},
                              timeout=timeout)
+    except requests.RequestException:
+        return False
+    if resp.status_code != 200:
+        return False
+    try:
+        return bool(resp.json().get("ok"))
+    except ValueError:
+        return False
+
+
+def edit_message_reply_markup(token: str, chat_id, message_id: int,
+                              reply_markup: dict | None,
+                              timeout: int = 10) -> bool:
+    """Best-effort editMessageReplyMarkup — swap a sent message's inline keyboard.
+
+    Used by the 👍/👎 feedback loop to re-render the buttons after a vote so the
+    chosen option is visibly marked (an "affordance" the user voted). The
+    `reply_markup` is JSON-serialised as the Bot API requires; pass ``None`` to
+    strip the keyboard entirely.
+
+    Returns True only on a confirmed ``ok`` from the API, False otherwise. NEVER
+    raises: editing a message that's too old, already gone, or otherwise
+    un-editable is expected to fail, and a failed cosmetic edit must never break
+    the poll loop — the vote itself is already recorded by the caller.
+    """
+    payload: dict = {"chat_id": chat_id, "message_id": message_id}
+    if reply_markup is not None:
+        payload["reply_markup"] = json.dumps(reply_markup)
+    try:
+        resp = requests.post(_BASE.format(token=token, method="editMessageReplyMarkup"),
+                             json=payload, timeout=timeout)
     except requests.RequestException:
         return False
     if resp.status_code != 200:

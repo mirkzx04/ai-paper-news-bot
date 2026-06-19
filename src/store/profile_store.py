@@ -9,22 +9,62 @@ the planned deployment where mutable state is JSON committed to a `state` branch
 All mutations dedup case-insensitively while preserving the user's casing, and
 auto-save. Mutators return the items that were *newly* added, so command
 handlers can give precise replies ("added X", "already present: Y").
+
+An OPTIONAL observer (``listener``) can be injected to react to *real* changes:
+a ``Callable[[str, str, str], None]`` invoked once per item actually added or
+removed, with ``(action, kind, value)`` where ``action`` is ``"add"|"remove"``
+and ``kind`` is ``"author"|"keyword"|"topic"|"conference"|"seed"``. It defaults
+to ``None``, in which case the store behaves EXACTLY as before. This is how
+preference signals are forwarded to the append-only `PreferenceDataset` without
+coupling this store to it (the concrete listener lives in `preference_dataset`).
+A faulty listener can never corrupt the overlay or propagate to the bot: every
+notification is wrapped and failures are only logged.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
+from typing import Callable, Optional
+
+logger = logging.getLogger(__name__)
+
+# Observer signature: (action, kind, value) -> None.
+ProfileListener = Callable[[str, str, str], None]
 
 
 class ProfileStore:
     _LIST_KEYS = ("authors", "keywords", "conferences")
+    # Maps the internal storage key to the singular `kind` used in notifications.
+    _KEY_TO_KIND = {"authors": "author", "keywords": "keyword",
+                    "conferences": "conference", "seeds": "seed"}
 
-    def __init__(self, path: str = "data/profile_overlay.json") -> None:
+    def __init__(
+        self,
+        path: str = "data/profile_overlay.json",
+        listener: Optional[ProfileListener] = None,
+    ) -> None:
         self.path = path
+        # Optional observer; None => no notifications, identical to prior behaviour.
+        self._listener = listener
         self._data: dict = {"authors": [], "keywords": [], "topics": {},
                             "conferences": [], "seeds": []}
         self._load()
+
+    # ---- observer ----------------------------------------------------------
+    def _notify(self, action: str, kind: str, value: str) -> None:
+        """Invoke the injected listener for one real change. NEVER raises.
+
+        Persisting the user's profile must not depend on, nor be broken by, the
+        observer: any listener error is swallowed and logged.
+        """
+        if self._listener is None:
+            return
+        try:
+            self._listener(action, kind, value)
+        except Exception as exc:  # noqa: BLE001 — observer must never break a mutation
+            logger.warning("profile listener failed on %s/%s: %s", action, kind, exc)
 
     # ---- persistence -------------------------------------------------------
     def _load(self) -> None:
@@ -88,6 +128,13 @@ class ProfileStore:
         added = _append_unique(topics[key], keywords)
         if created or added:
             self._save()
+        # Notify per added keyword (the keywords are the preference signal). If
+        # the topic was created with no keywords there is no per-keyword value,
+        # so emit a single event carrying the topic name to avoid losing it.
+        for kw in added:
+            self._notify("add", "topic", kw)
+        if created and not added:
+            self._notify("add", "topic", key)
         return (created, added)
 
     def remove_authors(self, names: list[str]) -> list[str]:
@@ -114,12 +161,21 @@ class ProfileStore:
         if existing_key is None:
             return ("not_found", [])
         if not keywords:
+            removed_kws = list(topics[existing_key])
             del topics[existing_key]
             self._save()
+            # Removing a whole topic withdraws each of its keywords as a signal;
+            # if it had none, emit one event with the topic name (mirrors add).
+            for kw in removed_kws:
+                self._notify("remove", "topic", kw)
+            if not removed_kws:
+                self._notify("remove", "topic", existing_key)
             return ("topic_removed", [])
         removed = _remove_unique(topics[existing_key], keywords)
         if removed:
             self._save()
+        for kw in removed:
+            self._notify("remove", "topic", kw)
         return ("keywords_removed", removed)
 
     # ---- internals ---------------------------------------------------------
@@ -127,12 +183,18 @@ class ProfileStore:
         added = _append_unique(self._data[key], items)
         if added:
             self._save()
+        kind = self._KEY_TO_KIND[key]
+        for value in added:
+            self._notify("add", kind, value)
         return added
 
     def _remove_from_list(self, key: str, items: list[str]) -> list[str]:
         removed = _remove_unique(self._data[key], items)
         if removed:
             self._save()
+        kind = self._KEY_TO_KIND[key]
+        for value in removed:
+            self._notify("remove", kind, value)
         return removed
 
 

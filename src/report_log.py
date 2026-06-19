@@ -38,6 +38,21 @@ class ReportLog:
             return []
         return data
 
+    def recent(self, n: int = 10) -> list:
+        """Return the most recent `n` report records (newest last in the file,
+        so the tail is the latest). Missing/corrupt file -> []. NEVER raises.
+
+        Records keep their on-disk shape ``{"timestamp", "report"}``. ``n <= 0``
+        returns []; ``n`` larger than the log returns every record.
+        """
+        if n <= 0:
+            return []
+        return self._read()[-n:]
+
+    def count(self) -> int:
+        """Total number of stored reports. Missing/corrupt file -> 0. NEVER raises."""
+        return len(self._read())
+
     def add(self, text: str) -> None:
         """Append a timestamped report record to the JSON list. NEVER raises."""
         try:

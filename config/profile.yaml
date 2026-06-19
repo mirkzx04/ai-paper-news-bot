@@ -113,6 +113,21 @@ thresholds:
   digest: 0.30      # ~2 keyword nel titolo
   alert: 0.60       # match forte (keyword+embedding) o autore seguito
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Feedback loop 👍/👎 (inline button sotto ogni paper). I voti diventano seed
+# DINAMICI nel solo canale embedding: 👍 = nuovo centro d'interesse, 👎 = penalità
+# soft con margine. Confinato all'embedding (keyword/autori dichiarati restano
+# intatti), ancorato sotto i seed di onboarding e robusto a pochi voti (cold-start).
+# Senza voti, lo scoring è identico a Phase 2.
+# ─────────────────────────────────────────────────────────────────────────────
+feedback:
+  w_pos_max: 0.6       # peso max di un 👍 (< 1.0 dei seed di onboarding: ancoraggio)
+  neg_lambda: 0.5      # peso del termine negativo (< 1: il 👎 è più conservativo)
+  baseline_neg: 0.80   # margine: il 👎 colpisce solo paper molto simili (b_neg > b=0.75)
+  tau_days: 120        # decadimento temporale dei voti: exp(-Δt/τ)
+  coldstart_k: 5       # il loop pesa 0→pieno nei primi K voti totali
+  cap_m: 50            # max voti per classe (ring-buffer): niente drift, gist contenuto
+
 sources:
   arxiv:
     categories: [cs.LG, cs.CL, cs.CV, cs.AI, stat.ML]
