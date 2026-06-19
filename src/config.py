@@ -35,6 +35,7 @@ class AppConfig:
     sources: dict = field(default_factory=dict)
     topics: dict = field(default_factory=dict)
     feedback: FeedbackConfig = field(default_factory=FeedbackConfig)
+    digest_cap: int = 5  # max digest papers per send (top-N by score); alerts are never capped
 
 
 def load_config(path: str) -> AppConfig:
@@ -76,6 +77,7 @@ def load_config(path: str) -> AppConfig:
         sources=raw.get("sources", {}) or {},
         topics=raw.get("topics", {}) or {},
         feedback=feedback,
+        digest_cap=int(raw.get("digest_cap", 5)),
     )
 
 
