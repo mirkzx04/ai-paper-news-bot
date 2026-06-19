@@ -9,6 +9,7 @@ where each message gets inline 👍/👎 buttons.
 from __future__ import annotations
 
 import html
+import json
 import logging
 import re
 import time
@@ -16,6 +17,7 @@ import time
 import requests
 
 from src.notify.base import Notifier, ScoredItem
+from src.store.sent_items_store import token_for_key
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +26,13 @@ _API = "https://api.telegram.org/bot{token}/{method}"
 # Short summary budget: keep notifications skimmable.
 _SUMMARY_MAX_CHARS = 300
 _SUMMARY_MAX_SENTENCES = 2
+
+# Inline 👍/👎 feedback buttons. callback_data is "fb:<u|d>:<token>", where the
+# token is the paper's canonical key when it fits Telegram's 64-byte budget, or a
+# short hash otherwise (see sent_items_store.token_for_key). The poller parses
+# this prefix back into a vote signal + token.
+_FEEDBACK_UP_PREFIX = "fb:u:"
+_FEEDBACK_DOWN_PREFIX = "fb:d:"
 
 
 def _short_summary(text: str) -> str:
@@ -64,6 +73,8 @@ class TelegramNotifier(Notifier):
         throttle: float = 0.5,   # stay under Telegram's ~1 msg/s per-chat limit
         timeout: int = 20,
         field_classifier=None,   # duck-typed: .classify(item) -> list[str]
+        sent_items=None,         # optional SentItemsStore: enables 👍/👎 buttons
+        preference_dataset=None,  # optional PreferenceDataset: enables impression logging
     ) -> None:
         self.token = token
         self.chat_id = chat_id
@@ -71,16 +82,101 @@ class TelegramNotifier(Notifier):
         self.throttle = throttle
         self.timeout = timeout
         self.field_classifier = field_classifier
+        # When None, no inline keyboard is attached and nothing is recorded — the
+        # notifier behaves byte-for-byte as before. When a SentItemsStore is
+        # injected, each message gets 👍/👎 buttons and the paper is recorded so
+        # a later callback_query can be turned into a vote.
+        self.sent_items = sent_items
+        # When None, no impression is logged — the notifier behaves exactly as
+        # before. When a PreferenceDataset is injected, every paper actually sent
+        # is logged as an ``impression`` event (the exposure half of the feedback
+        # signal: shown-but-not-necessarily-voted). CRITICAL: impressions are
+        # eval/analysis-only WEAK negatives; they MUST NOT feed the scoring loop.
+        # The embedding feedback vectors read ``events(types=["vote"])`` only, so
+        # impressions never influence ranking (see src/embedding/feedback_vectors).
+        self.preference_dataset = preference_dataset
 
     def notify(self, scored: list[ScoredItem], *, kind: str) -> None:
         if not scored:
             return
         ordered = sorted(scored, key=lambda x: x.result.total, reverse=True)
         for s in ordered:
-            self._send(self._format(s, kind))
+            markup = self._feedback_markup(s) if self.sent_items is not None else None
+            resp = self._send(self._format(s, kind), reply_markup=markup)
+            # Best-effort: record the shown paper so the (much later) 👍/👎 tap can
+            # recover its text/score/breakdown. A recording failure must not stop
+            # the send loop, so it's fully guarded.
+            if self.sent_items is not None:
+                self._record_sent(s, resp)
+            # Log the exposure (impression) ONLY when the message actually went out
+            # (resp is the Telegram result dict on success, None on failure): an
+            # impression must mean the user really saw the paper. Best-effort.
+            if self.preference_dataset is not None and resp is not None:
+                self._record_impression(s, kind)
             time.sleep(self.throttle)
 
-    def _send(self, text: str) -> bool:
+    def _feedback_markup(self, s: ScoredItem) -> dict:
+        """Single-row inline keyboard: 👍 / 👎, each carrying its callback token."""
+        token = token_for_key(s.item.canonical_key)
+        return {"inline_keyboard": [[
+            {"text": "👍", "callback_data": _FEEDBACK_UP_PREFIX + token},
+            {"text": "👎", "callback_data": _FEEDBACK_DOWN_PREFIX + token},
+        ]]}
+
+    def _record_sent(self, s: ScoredItem, resp) -> None:
+        """Persist the paper behind a just-sent message into the sent_items store.
+
+        `text` (title + abstract) is the essential field — the scorer re-embeds it
+        when the vote lands. `score`/`breakdown` come straight from the ScoredItem
+        the notifier already holds, so the vote can be logged with the exact
+        ranker context it was shown with. NEVER raises (the store is defensive,
+        and this is wrapped too).
+        """
+        try:
+            self.sent_items.record(
+                s.item.canonical_key,
+                text=s.item.text(),
+                score=s.result.total,
+                breakdown=dict(s.result.breakdown),
+            )
+        except Exception as exc:  # noqa: BLE001 — feedback bookkeeping must not break sending
+            logger.warning("failed to record sent item %s: %s", s.item.canonical_key, exc)
+
+    def _record_impression(self, s: ScoredItem, kind: str) -> None:
+        """Append an ``impression`` event for a paper that was just shown.
+
+        Captures the exposure half of the feedback signal — what the user was
+        presented with, regardless of whether they 👍/👎 it — with the exact
+        ranker context (``score``/``breakdown``) and the ``route`` (``kind``,
+        i.e. "alert"/"digest"). This is WEAK, eval/analysis-only data: it is
+        deliberately NOT read by the embedding feedback loop (which consumes only
+        ``vote`` events), so a shown-but-unvoted paper can never penalise similar
+        papers and collapse recommendation diversity.
+
+        NEVER raises: an impression-logging failure must not stop the send loop
+        (PreferenceDataset.log is itself defensive, and this is wrapped too).
+        Schema (matches PreferenceDataset's documented ``impression`` event):
+            {"type": "impression", "canonical_key": str, "score": float|None,
+             "breakdown": dict|None, "route": "alert"|"digest"}
+        """
+        try:
+            self.preference_dataset.log({
+                "type": "impression",
+                "canonical_key": s.item.canonical_key,
+                "score": s.result.total,
+                "breakdown": dict(s.result.breakdown),
+                "route": kind,
+            })
+        except Exception as exc:  # noqa: BLE001 — impression logging must not break sending
+            logger.warning("failed to log impression for %s: %s", s.item.canonical_key, exc)
+
+    def _send(self, text: str, reply_markup: dict | None = None):
+        """POST one message. Returns the parsed Telegram ``result`` dict on success
+        (so the caller can read ``message_id``), or ``None`` on any failure.
+
+        `reply_markup` is optional and JSON-serialised as the Bot API requires;
+        without it the payload is identical to before.
+        """
         url = _API.format(token=self.token, method="sendMessage")
         payload = {
             "chat_id": self.chat_id,
@@ -88,15 +184,20 @@ class TelegramNotifier(Notifier):
             "parse_mode": self.parse_mode,
             "disable_web_page_preview": False,
         }
+        if reply_markup is not None:
+            payload["reply_markup"] = json.dumps(reply_markup)
         try:
             resp = requests.post(url, json=payload, timeout=self.timeout)
         except requests.RequestException as exc:
             logger.warning("telegram send error: %s", exc)
-            return False
+            return None
         if resp.status_code != 200:
             logger.warning("telegram send failed %s: %s", resp.status_code, resp.text[:200])
-            return False
-        return True
+            return None
+        try:
+            return resp.json().get("result")
+        except ValueError:
+            return None
 
     def _format(self, s: ScoredItem, kind: str) -> str:
         item = s.item

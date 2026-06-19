@@ -24,6 +24,7 @@ from src.commands.remove_keywords import RemoveKeywordsCommand
 from src.commands.remove_topic import RemoveTopicCommand
 from src.commands.report import ReportCommand
 from src.config import apply_profile_overlay, load_config
+from src.embedding.feedback_vectors import load_or_build_feedback_vectors
 from src.embedding.profile_vector import load_or_build
 from src.embedding.specter import SpecterEmbedder
 from src.enrich.semantic_scholar import resolve_author_ids
@@ -33,13 +34,16 @@ from src.notify.base import Notifier
 from src.notify.console_notifier import ConsoleNotifier
 from src.notify.telegram_notifier import TelegramNotifier
 from src.pipeline import Pipeline
+from src.report_log import ReportLog
 from src.scoring.author_scorer import AuthorScorer
 from src.scoring.combined import CombinedScorer
 from src.scoring.embedding_scorer import EmbeddingScorer
 from src.scoring.field_classifier import FieldClassifier
 from src.scoring.keyword_scorer import KeywordScorer
 from src.sources.arxiv_source import ArxivSource
+from src.store.preference_dataset import PreferenceDataset, ProfileListener
 from src.store.profile_store import ProfileStore
+from src.store.sent_items_store import SentItemsStore
 from src.store.sqlite_store import SqliteStore
 from src.telegram_api import set_my_commands
 from src.telegram_poller import TelegramPoller
@@ -62,7 +66,8 @@ def build_commands() -> list:
     ]
 
 
-def build_notifier(kind: str, parser: argparse.ArgumentParser, field_classifier) -> Notifier:
+def build_notifier(kind: str, parser: argparse.ArgumentParser, field_classifier,
+                   sent_items=None, preference_dataset=None) -> Notifier:
     if kind == "telegram":
         token = os.environ.get("TELEGRAM_BOT_TOKEN")
         chat_id = os.environ.get("TELEGRAM_CHAT_ID")
@@ -71,7 +76,8 @@ def build_notifier(kind: str, parser: argparse.ArgumentParser, field_classifier)
                 "il notifier telegram richiede TELEGRAM_BOT_TOKEN e TELEGRAM_CHAT_ID "
                 "(in .env o nell'ambiente). Vedi tools/telegram_setup.py per il chat_id."
             )
-        return TelegramNotifier(token, chat_id, field_classifier=field_classifier)
+        return TelegramNotifier(token, chat_id, field_classifier=field_classifier,
+                                sent_items=sent_items, preference_dataset=preference_dataset)
     return ConsoleNotifier(field_classifier=field_classifier)
 
 
@@ -93,10 +99,26 @@ def build_pipeline(cfg, store, notifier,
                                  seed_texts=list(cfg.profile.seed_texts))
     if seed_vectors is None:
         logger.info("no seed papers -> embedding scorer is a no-op")
+    # Feedback loop (👍/👎): votes become dynamic seeds in the embedding channel
+    # — 👍 positive centers of interest, 👎 a soft margined penalty. Confined to
+    # embedding (declared keyword/author signals stay intact) and anchored below
+    # the onboarding seeds. With no votes this returns (None, …) and the scorer
+    # behaves exactly as in Phase 2.
+    fb = cfg.feedback
+    pos_vecs, pos_w, neg_vecs, neg_w = load_or_build_feedback_vectors(
+        PreferenceDataset(), embedder, cache_path="data/feedback_vectors.json",
+        w_pos_max=fb.w_pos_max, tau_days=fb.tau_days,
+        coldstart_k=fb.coldstart_k, cap_m=fb.cap_m,
+    )
     scorer = CombinedScorer({
         "keyword": KeywordScorer(),
         "author": AuthorScorer(),
-        "embedding": EmbeddingScorer(embedder, seed_vectors),
+        "embedding": EmbeddingScorer(
+            embedder, seed_vectors,
+            pos_vectors=pos_vecs, pos_weights=pos_w,
+            neg_vectors=neg_vecs, neg_weights=neg_w,
+            baseline_neg=fb.baseline_neg, neg_lambda=fb.neg_lambda,
+        ),
     })
     return Pipeline(sources, scorer, store, notifier, cfg.profile, cfg.thresholds)
 
@@ -172,20 +194,30 @@ def main() -> None:
     cfg = load_config(args.config)
     os.makedirs(os.path.dirname(args.db) or ".", exist_ok=True)
     store = SqliteStore(args.db)
-    profile_store = ProfileStore(args.overlay)
+    # Every profile edit is mirrored into the append-only preference dataset
+    # (data/preferences.jsonl, gist-synced). Listener is the only DI seam; with
+    # it absent ProfileStore behaves exactly as before.
+    preference_dataset = PreferenceDataset()
+    profile_store = ProfileStore(args.overlay, listener=ProfileListener(preference_dataset))
 
     # Command-poll mode: read pending commands, mutate the overlay, reply, exit.
     if args.poll_commands:
         token = os.environ.get("TELEGRAM_BOT_TOKEN")
         if not token:
             parser.error("--poll-commands richiede TELEGRAM_BOT_TOKEN (in .env o nell'ambiente).")
+        admin_chat_id = os.environ.get("TELEGRAM_CHAT_ID")  # owner = admin for /reports, /errors
+        sent_items = SentItemsStore(args.db)  # resolves an incoming 👍/👎 back to its paper
         dispatcher = CommandDispatcher(build_commands(), profile_store)
         flow = ProfileFlow(store, profile_store)
-        poller = TelegramPoller(token, dispatcher, store, flow=flow)
+        poller = TelegramPoller(token, dispatcher, store, flow=flow,
+                                report_log=ReportLog(), admin_chat_id=admin_chat_id,
+                                preference_dataset=preference_dataset, sent_items=sent_items)
         try:
             sent = poller.poll_once()
+            poller.notify_new_errors()  # end-of-run push to admin; no-op if no new errors / no admin
             print(f"comandi processati, risposte inviate: {sent}")
         finally:
+            sent_items.close()
             store.close()
         return
 
@@ -194,7 +226,11 @@ def main() -> None:
     cfg = apply_profile_overlay(cfg, profile_store)
     cfg = replace(cfg, profile=enrich_author_ids(cfg.profile))
     field_classifier = FieldClassifier(cfg.topics)
-    notifier = build_notifier(args.notifier, parser, field_classifier)
+    # Record each sent paper so its 👍/👎 vote (arriving on a later run) resolves
+    # back to it. Only the Telegram notifier needs it; shares data/bot.db.
+    sent_items = SentItemsStore(args.db) if args.notifier == "telegram" else None
+    notifier = build_notifier(args.notifier, parser, field_classifier,
+                              sent_items=sent_items, preference_dataset=preference_dataset)
     pipeline = build_pipeline(cfg, store, notifier)
 
     lookback = args.lookback_days
@@ -205,6 +241,8 @@ def main() -> None:
     try:
         pipeline.run(since, mark_seen=not args.dry_run)
     finally:
+        if sent_items is not None:
+            sent_items.close()
         store.close()
 
 
