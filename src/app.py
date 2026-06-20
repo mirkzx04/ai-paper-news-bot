@@ -59,6 +59,17 @@ logger = logging.getLogger("app")
 _LAST_DIGEST_KEY = "last_digest_at"  # meta key: UTC ISO time of the last sent digest
 
 
+def _scoped_user_path(path: str, user_id: str | None) -> str:
+    """Store per-user runtime caches under ``data/users/<anonymous-id>/``."""
+    if not user_id:
+        return path
+    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
+    safe = "".join(ch for ch in str(user_id) if ch in allowed)
+    if not safe:
+        return path
+    return os.path.join(os.path.dirname(path), "users", safe, os.path.basename(path))
+
+
 class MissingCredentialsError(ValueError):
     """Raised by ``build_notifier`` when the Telegram credentials are absent.
 
@@ -165,7 +176,7 @@ def build_commands() -> list:
 
 
 def build_notifier(kind: str, field_classifier, *,
-                   sent_items=None, preference_dataset=None) -> Notifier:
+                   sent_items=None, preference_dataset=None, user_id: str | None = None) -> Notifier:
     """Construct the notifier for ``kind`` ("telegram" or anything else -> console).
 
     Framework-free variant of the original ``main.build_notifier``: instead of
@@ -182,12 +193,16 @@ def build_notifier(kind: str, field_classifier, *,
                 "(in .env o nell'ambiente). Vedi tools/telegram_setup.py per il chat_id."
             )
         return TelegramNotifier(token, chat_id, field_classifier=field_classifier,
-                                sent_items=sent_items, preference_dataset=preference_dataset)
+                                sent_items=sent_items, preference_dataset=preference_dataset,
+                                user_id=user_id)
     return ConsoleNotifier(field_classifier=field_classifier)
 
 
 def build_pipeline(cfg, store, notifier,
-                   profile_vector_path: str = "data/profile_vector.json") -> Pipeline:
+                   profile_vector_path: str = "data/profile_vector.json",
+                   preference_dataset=None,
+                   user_id: str | None = None,
+                   feedback_vector_path: str = "data/feedback_vectors.json") -> Pipeline:
     arxiv_cfg = cfg.sources.get("arxiv", {})
     sources = [
         ArxivSource(
@@ -200,7 +215,8 @@ def build_pipeline(cfg, store, notifier,
     # are seed papers and the cached vector is stale. With no seeds the profile
     # vector is None and EmbeddingScorer is a no-op (the model never loads).
     embedder = SpecterEmbedder()
-    seed_vectors = load_or_build(list(cfg.profile.seed_arxiv_ids), embedder, profile_vector_path,
+    seed_vector_path = _scoped_user_path(profile_vector_path, user_id)
+    seed_vectors = load_or_build(list(cfg.profile.seed_arxiv_ids), embedder, seed_vector_path,
                                  seed_texts=list(cfg.profile.seed_texts))
     if seed_vectors is None:
         logger.info("no seed papers -> embedding scorer is a no-op")
@@ -210,8 +226,10 @@ def build_pipeline(cfg, store, notifier,
     # the onboarding seeds. With no votes this returns (None, …) and the scorer
     # behaves exactly as in Phase 2.
     fb = cfg.feedback
+    dataset = preference_dataset if preference_dataset is not None else PreferenceDataset()
     pos_vecs, pos_w, neg_vecs, neg_w = load_or_build_feedback_vectors(
-        PreferenceDataset(), embedder, cache_path="data/feedback_vectors.json",
+        dataset, embedder, cache_path=_scoped_user_path(feedback_vector_path, user_id),
+        user_id=user_id,
         w_pos_max=fb.w_pos_max, tau_days=fb.tau_days,
         coldstart_k=fb.coldstart_k, cap_m=fb.cap_m,
     )
@@ -259,7 +277,7 @@ def enrich_author_ids(profile, cache_path: str = "data/author_ids.json"):
 
 
 def build_poller(token, store, profile_store, preference_dataset, *,
-                 admin_chat_id, report_log, sent_items, flow) -> TelegramPoller:
+                 admin_chat_id, report_log, sent_items, flow, profile_store_provider=None) -> TelegramPoller:
     """Construct the command poller exactly as the ``--poll-commands`` branch does.
 
     Both entry points share this so the dispatcher/flow/feedback wiring lives in
@@ -273,11 +291,12 @@ def build_poller(token, store, profile_store, preference_dataset, *,
     return TelegramPoller(token, dispatcher, store, flow=flow,
                           error_log=error_log, report_log=report_log,
                           admin_chat_id=admin_chat_id, preference_dataset=preference_dataset,
-                          sent_items=sent_items)
+                          sent_items=sent_items, profile_store_provider=profile_store_provider)
 
 
 def run_digest_once(cfg, store, profile_store, preference_dataset, *,
-                    notifier_kind, lookback_override, dry_run, now) -> RunSummary | None:
+                    notifier_kind, lookback_override, dry_run, now,
+                    user_id: str | None = None) -> RunSummary | None:
     """Run a single digest tick; the shared contract for CLI and serve loop.
 
     Encapsulates exactly the digest branch of ``main.py``:
@@ -338,8 +357,10 @@ def run_digest_once(cfg, store, profile_store, preference_dataset, *,
         # back to it. Only the Telegram notifier needs it; shares data/bot.db.
         sent_items = SentItemsStore(_store_db_path(store)) if is_telegram else None
         notifier = build_notifier(notifier_kind, field_classifier,
-                                  sent_items=sent_items, preference_dataset=preference_dataset)
-        pipeline = build_pipeline(cfg, store, notifier)
+                                  sent_items=sent_items, preference_dataset=preference_dataset,
+                                  user_id=user_id)
+        pipeline = build_pipeline(cfg, store, notifier, preference_dataset=preference_dataset,
+                                  user_id=user_id)
         summary = pipeline.run(since, mark_seen=not dry_run)
         if not dry_run:
             store.set_meta(_LAST_DIGEST_KEY, now.isoformat())

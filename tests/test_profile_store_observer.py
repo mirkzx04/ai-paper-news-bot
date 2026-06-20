@@ -20,7 +20,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.store.preference_dataset import PreferenceDataset, ProfileListener
-from src.store.profile_store import ProfileStore
+from src.store.profile_store import ProfileStore, UserProfileStoreProvider
 
 
 class _Recorder:
@@ -197,6 +197,29 @@ class ProfileStoreToDatasetIntegrationTest(unittest.TestCase):
         )
         # Every event carries a ts.
         self.assertTrue(all("ts" in e for e in events))
+
+    def test_profile_listener_can_attach_anonymous_user_id(self) -> None:
+        store = ProfileStore(
+            os.path.join(self.tmp.name, "user_overlay.json"),
+            listener=ProfileListener(self.ds, user_id="u_anon"),
+        )
+        store.add_keywords(["privacy"])
+
+        event = self.ds.events()[0]
+        self.assertEqual(event["user_id"], "u_anon")
+        self.assertNotIn("username", event)
+
+    def test_user_profile_provider_isolates_paths(self) -> None:
+        provider = UserProfileStoreProvider(
+            os.path.join(self.tmp.name, "profile_overlay.json"),
+            listener_factory=lambda user_id: ProfileListener(self.ds, user_id=user_id),
+        )
+        provider.for_user("u_a").add_keywords(["alpha"])
+        provider.for_user("u_b").add_keywords(["beta"])
+
+        self.assertEqual(ProfileStore(provider.path_for("u_a")).keywords, ["alpha"])
+        self.assertEqual(ProfileStore(provider.path_for("u_b")).keywords, ["beta"])
+        self.assertEqual([e["user_id"] for e in self.ds.events()], ["u_a", "u_b"])
 
 
 if __name__ == "__main__":

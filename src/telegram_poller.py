@@ -25,6 +25,7 @@ from src.telegram_api import (
     get_updates,
     send_message,
 )
+from src.user_identity import telegram_user_id
 
 logger = logging.getLogger(__name__)
 
@@ -101,7 +102,8 @@ class TelegramPoller:
     def __init__(self, token: str, dispatcher: CommandDispatcher, store: Store,
                  flow=None, error_log: ErrorLog | None = None,
                  report_log: ReportLog | None = None, admin_chat_id: str | None = None,
-                 preference_dataset=None, sent_items=None,
+                 preference_dataset=None, sent_items=None, profile_store_provider=None,
+                 user_id_resolver=telegram_user_id,
                  timeout: int = 20) -> None:
         self.token = token
         self.dispatcher = dispatcher
@@ -117,6 +119,8 @@ class TelegramPoller:
         # preference_dataset None, callback_query updates are simply ignored.
         self.preference_dataset = preference_dataset
         self.sent_items = sent_items
+        self.profile_store_provider = profile_store_provider
+        self.user_id_resolver = user_id_resolver
         # str() the chat id so a numeric env value and Telegram's int id compare
         # equal; None disables the owner-only commands (they fall through to the
         # dispatcher, which answers "unknown command" — no leak that they exist).
@@ -126,6 +130,22 @@ class TelegramPoller:
         # can report only the errors recorded by THIS process (CI runs the poller
         # once per cron tick). Snapshot now, before any poll has logged anything.
         self._errors_at_start = self.error_log.count()
+
+    def _user_id_from_sender(self, sender: dict | None) -> str | None:
+        try:
+            return self.user_id_resolver(sender)
+        except Exception as exc:  # noqa: BLE001 - identity failure must not break polling
+            logger.warning("anonymous user id resolution failed: %s", exc)
+            return None
+
+    def _profile_store_for(self, user_id: str | None):
+        if self.profile_store_provider is None or user_id is None:
+            return None
+        try:
+            return self.profile_store_provider.for_user(user_id)
+        except Exception as exc:  # noqa: BLE001 - fall back to dispatcher default
+            logger.warning("profile store resolution failed for %s: %s", user_id, exc)
+            return None
 
     def poll_once(self, long_poll: int = 0) -> int:
         """Fetch and process pending updates. Returns how many replies were sent.
@@ -184,6 +204,8 @@ class TelegramPoller:
                 continue
             message = update.get("message") or update.get("edited_message") or {}
             chat = message.get("chat") or {}
+            user_id = self._user_id_from_sender(message.get("from"))
+            active_profile_store = self._profile_store_for(user_id)
             text = message.get("text")
             if not text or not chat:
                 continue
@@ -212,9 +234,13 @@ class TelegramPoller:
                 # The profile-creation flow gets first refusal (it owns
                 # /creare_profile and any mid-onboarding chat); else command dispatch.
                 if self.flow is not None:
-                    reply = self.flow.maybe_handle(chat["id"], text)
+                    reply = self.flow.maybe_handle(
+                        chat["id"], text, profile_store=active_profile_store, scope_id=user_id)
                 if reply is None:
-                    reply = self.dispatcher.dispatch(text)
+                    if active_profile_store is None:
+                        reply = self.dispatcher.dispatch(text)
+                    else:
+                        reply = self.dispatcher.dispatch(text, store=active_profile_store)
             except Exception as exc:  # never let one bad message kill the poll
                 self.error_log.record(command="<message>", args=text[:200],
                                       error=repr(exc), traceback_str=traceback.format_exc())
@@ -296,6 +322,7 @@ class TelegramPoller:
         the poll, and the vote is already persisted by the time we attempt it).
         """
         parsed = self._parse_feedback_data(callback.get("data"))
+        user_id = self._user_id_from_sender(callback.get("from"))
         toast: str | None = None
         try:
             # Feature off, or unparseable data: nothing to log. Still ack below.
@@ -316,8 +343,8 @@ class TelegramPoller:
                     breakdown = record.get("breakdown")
             # Re-tapping your own current vote withdraws it (toggle-off ->
             # "none"); otherwise the tapped signal becomes the net vote.
-            new_signal = self._effective_signal(tapped_signal, canonical_key)
-            self._log_vote(new_signal, canonical_key, text, score, breakdown)
+            new_signal = self._effective_signal(tapped_signal, canonical_key, user_id=user_id)
+            self._log_vote(new_signal, canonical_key, text, score, breakdown, user_id=user_id)
             toast = _FEEDBACK_TOASTS.get(new_signal)
             # Affordance: mark the new net state on the buttons (best-effort).
             self._refresh_feedback_markup(callback, token, new_signal)
@@ -328,7 +355,8 @@ class TelegramPoller:
                 # always be stopped, even if logging above failed.
                 answer_callback_query(self.token, cq_id, text=toast)
 
-    def _effective_signal(self, tapped_signal: str, canonical_key: str) -> str:
+    def _effective_signal(self, tapped_signal: str, canonical_key: str,
+                          user_id: str | None = None) -> str:
         """Resolve the tapped emoji into the new net signal, honouring toggle-off.
 
         Re-tapping the emoji of the *current* vote withdraws it: we return
@@ -338,7 +366,7 @@ class TelegramPoller:
         MVP, where a re-tap was a silent no-op (the owner wants an explicit
         un-vote so a mis-tap is recoverable from the chat itself).
         """
-        return "none" if self._current_vote_signal(canonical_key) == tapped_signal else tapped_signal
+        return "none" if self._current_vote_signal(canonical_key, user_id=user_id) == tapped_signal else tapped_signal
 
     def _refresh_feedback_markup(self, callback: dict, token: str, signal: str) -> None:
         """Re-render the inline keyboard to reflect `signal`, if it changed.
@@ -370,7 +398,8 @@ class TelegramPoller:
             # swallow any failure here (don't even surface it to the error log).
             logger.warning("feedback keyboard refresh failed for %s: %s", token, exc)
 
-    def _log_vote(self, signal: str, canonical_key: str, text, score, breakdown) -> None:
+    def _log_vote(self, signal: str, canonical_key: str, text, score, breakdown,
+                  user_id: str | None = None) -> None:
         """Append a ``vote`` event for the resolved net `signal`, unless redundant.
 
         `signal` is the *new net state* already resolved by ``_effective_signal``:
@@ -383,27 +412,31 @@ class TelegramPoller:
         ``signal:"none"`` event, not a deletion.
 
         Schema written (matches PreferenceDataset's documented ``vote`` event):
-            {"type": "vote", "signal": "up"|"down"|"none", "canonical_key": str,
-             "score": float|None, "breakdown": dict|None, "text": str|None}
+            {"type": "vote", "user_id": str, "signal": "up"|"down"|"none",
+             "canonical_key": str, "score": float|None, "breakdown": dict|None,
+             "text": str|None}
         The ``"none"`` signal is consumed downstream as "no preference": the
         embedding feedback loop excludes such keys from both classes, and the
         label export drops them from positives/negatives (net-state coherence).
         """
-        if self._current_vote_signal(canonical_key) == signal:
+        if self._current_vote_signal(canonical_key, user_id=user_id) == signal:
             logger.info("vote %s on %s matches current net state; not re-appending",
                         signal, canonical_key)
             return
-        self.preference_dataset.log({
+        event = {
             "type": "vote",
             "signal": signal,
             "canonical_key": canonical_key,
             "score": score,
             "breakdown": breakdown,
             "text": text,
-        })
+        }
+        if user_id is not None:
+            event["user_id"] = user_id
+        self.preference_dataset.log(event)
         logger.info("logged vote %s on %s", signal, canonical_key)
 
-    def _current_vote_signal(self, canonical_key: str) -> str | None:
+    def _current_vote_signal(self, canonical_key: str, user_id: str | None = None) -> str | None:
         """The net vote for `canonical_key`: the most recent ``vote`` signal, or None.
 
         Returns ``"up"``/``"down"`` for an active vote, ``"none"`` when the last
@@ -416,7 +449,7 @@ class TelegramPoller:
         toggles off from this state).
         """
         latest: str | None = None
-        for ev in self.preference_dataset.events(types=["vote"]):
+        for ev in self.preference_dataset.events(types=["vote"], user_id=user_id):
             if ev.get("canonical_key") == canonical_key:
                 latest = ev.get("signal")
         return latest

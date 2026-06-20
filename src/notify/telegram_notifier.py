@@ -83,6 +83,7 @@ class TelegramNotifier(Notifier):
         field_classifier=None,   # duck-typed: .classify(item) -> list[str]
         sent_items=None,         # optional SentItemsStore: enables 👍/👎 buttons
         preference_dataset=None,  # optional PreferenceDataset: enables impression logging
+        user_id: str | None = None,  # optional anonymous user id for impression events
         max_retries: int = _DEFAULT_MAX_RETRIES,        # total send attempts on HTTP 429
         retry_after_cap: float = _DEFAULT_RETRY_AFTER_CAP,  # max seconds to honour per 429
     ) -> None:
@@ -108,6 +109,7 @@ class TelegramNotifier(Notifier):
         # The embedding feedback vectors read ``events(types=["vote"])`` only, so
         # impressions never influence ranking (see src/embedding/feedback_vectors).
         self.preference_dataset = preference_dataset
+        self.user_id = user_id
 
     def notify(self, scored: list[ScoredItem], *, kind: str) -> None:
         if not scored:
@@ -173,13 +175,16 @@ class TelegramNotifier(Notifier):
              "breakdown": dict|None, "route": "alert"|"digest"}
         """
         try:
-            self.preference_dataset.log({
+            event = {
                 "type": "impression",
                 "canonical_key": s.item.canonical_key,
                 "score": s.result.total,
                 "breakdown": dict(s.result.breakdown),
                 "route": kind,
-            })
+            }
+            if self.user_id is not None:
+                event["user_id"] = self.user_id
+            self.preference_dataset.log(event)
         except Exception as exc:  # noqa: BLE001 — impression logging must not break sending
             logger.warning("failed to log impression for %s: %s", s.item.canonical_key, exc)
 

@@ -44,7 +44,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.store.preference_dataset import PreferenceDataset
 
 
-def export_labels(dataset: PreferenceDataset) -> dict:
+def export_labels(dataset: PreferenceDataset, user_id: str | None = None) -> dict:
     """Build a labelled set from a `PreferenceDataset`.
 
     Returns a dict with:
@@ -78,7 +78,7 @@ def export_labels(dataset: PreferenceDataset) -> dict:
         if value in bucket:
             bucket.remove(value)
 
-    for ev in dataset.events(types=["profile_add", "profile_remove"]):
+    for ev in dataset.events(types=["profile_add", "profile_remove"], user_id=user_id):
         kind = ev.get("kind")
         value = ev.get("value")
         if not isinstance(value, str) or not value:
@@ -101,7 +101,7 @@ def export_labels(dataset: PreferenceDataset) -> dict:
     # necessary by introducing the "none" signal.)
     last_signal: dict[str, str] = {}
     order: list[str] = []
-    for ev in dataset.events(types=["vote"]):
+    for ev in dataset.events(types=["vote"], user_id=user_id):
         key = ev.get("canonical_key")
         signal = ev.get("signal")
         if not isinstance(key, str) or not key or signal not in ("up", "down", "none"):
@@ -120,7 +120,7 @@ def export_labels(dataset: PreferenceDataset) -> dict:
     # for scoring.
     voted_keys = set(last_signal)  # every key with at least one vote event
     weak_neg: list[str] = []
-    for ev in dataset.events(types=["impression"]):
+    for ev in dataset.events(types=["impression"], user_id=user_id):
         key = ev.get("canonical_key")
         if not isinstance(key, str) or not key or key in voted_keys:
             continue
@@ -143,9 +143,11 @@ def main() -> None:
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--path", default="data/preferences.jsonl",
                         help="preference dataset JSONL (default: data/preferences.jsonl)")
+    parser.add_argument("--user-id", default=None,
+                        help="export labels for one anonymous user id only")
     args = parser.parse_args()
 
-    labels = export_labels(PreferenceDataset(args.path))
+    labels = export_labels(PreferenceDataset(args.path), user_id=args.user_id)
     print(json.dumps(labels, ensure_ascii=False, indent=2))
     n_strong = len(labels["seed_positives"]) + len(labels["vote_positives"])
     if n_strong == 0:

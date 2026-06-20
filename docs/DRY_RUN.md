@@ -141,7 +141,8 @@ python main.py --poll-commands -v
   grep '"type": "vote"' data/preferences.jsonl | tail -n 3
   ```
   You should see your last action as `"signal": "down"` with the paper's
-  `canonical_key`, `score`, `breakdown`, and `text`.
+  `canonical_key`, `score`, `breakdown`, `text`, and an anonymous `user_id`.
+  Telegram usernames, nicknames and raw Telegram ids must not appear in this file.
 
 ### 3e. Toggle-off (withdraw a vote)
 
@@ -171,8 +172,10 @@ the bot process and reply (each `--poll-commands` drains the queue once).
   next prompt. Cancel anytime with `/annulla`.
 - **`/add_keywords mixture of experts, interpretability`** — bot confirms the
   keywords were added; verify a `profile_add` event lands in
-  `data/preferences.jsonl` (`preference_dataset.py:140-162`) and the overlay file
-  `data/profile_overlay.json` grew.
+  `data/preferences.jsonl` (`preference_dataset.py:140-162`) with an anonymous
+  `user_id`. The per-user overlay under `data/users/<user_id>/profile_overlay.json`
+  should grow; the legacy global `data/profile_overlay.json` is not used for
+  Telegram user-specific edits.
 - **`/report the venue field was wrong on paper X`** — bot replies "Thanks! Your
   report has been received..." (`commands/report.py:25-32`).
 - **Owner-only** (only work from *your* `TELEGRAM_CHAT_ID`, `main.py:237`):
@@ -248,7 +251,8 @@ which is out of scope for the current MVP.
 | Recorded runtime errors (also via `/errors`) | `data/error_log.jsonl` |
 | Saved user reports (also via `/reports`) | `data/reports.json` |
 | Telegram update offset / seen-ids | `data/bot.db` |
-| Current profile additions | `data/profile_overlay.json` |
+| Current Telegram user profile additions | `data/users/<user_id>/profile_overlay.json` |
+| Legacy/default profile additions | `data/profile_overlay.json` |
 
 ---
 

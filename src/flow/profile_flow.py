@@ -41,48 +41,49 @@ class ProfileFlow:
         self.profile_store = profile_store
         self.resolver = resolver
 
-    def _key(self, chat_id) -> str:
-        return f"flow:{chat_id}"
+    def _key(self, chat_id, scope_id=None) -> str:
+        return f"flow:{scope_id or chat_id}"
 
-    def active_step(self, chat_id) -> str | None:
-        return self.store.get_meta(self._key(chat_id)) or None
+    def active_step(self, chat_id, scope_id=None) -> str | None:
+        return self.store.get_meta(self._key(chat_id, scope_id)) or None
 
-    def start(self, chat_id) -> str:
-        self.store.set_meta(self._key(chat_id), "papers")
+    def start(self, chat_id, scope_id=None) -> str:
+        self.store.set_meta(self._key(chat_id, scope_id), "papers")
         return INSTRUCTIONS
 
-    def maybe_handle(self, chat_id, text: str) -> str | None:
+    def maybe_handle(self, chat_id, text: str, profile_store=None, scope_id=None) -> str | None:
         """Return a reply if this message belongs to the flow, else None.
 
         None lets the caller fall back to the normal command dispatcher.
         """
+        profile_store = profile_store or self.profile_store
         stripped = (text or "").strip()
         command = stripped.split()[0].split("@", 1)[0].lower() if stripped.startswith("/") else ""
 
         if command == "/creare_profile":
-            return self.start(chat_id)
+            return self.start(chat_id, scope_id)
         if command in ("/annulla", "/cancel"):
-            if self.active_step(chat_id):
-                self.store.set_meta(self._key(chat_id), "")
+            if self.active_step(chat_id, scope_id):
+                self.store.set_meta(self._key(chat_id, scope_id), "")
                 return "Profile setup canceled."
             return None
 
-        step = self.active_step(chat_id)
+        step = self.active_step(chat_id, scope_id)
         # A slash-command mid-onboarding (/start, /help, ...) is NOT step input:
         # hand it to the dispatcher and keep the flow on the same step, so a stray
         # command can't pollute the profile (e.g. "/start" saved as an author/keyword).
         if step and command:
             return None
         if step == "papers":
-            reply = handle_papers(stripped, self.profile_store, self.resolver)
-            self.store.set_meta(self._key(chat_id), "authors")
+            reply = handle_papers(stripped, profile_store, self.resolver)
+            self.store.set_meta(self._key(chat_id, scope_id), "authors")
             return f"{reply}\n\n{_PROMPT_AUTHORS}"
         if step == "authors":
-            reply = handle_authors(stripped, self.profile_store)
-            self.store.set_meta(self._key(chat_id), "topics")
+            reply = handle_authors(stripped, profile_store)
+            self.store.set_meta(self._key(chat_id, scope_id), "topics")
             return f"{reply}\n\n{_PROMPT_TOPICS}"
         if step == "topics":
-            reply = handle_topics(stripped, self.profile_store)
-            self.store.set_meta(self._key(chat_id), "")  # flow complete
+            reply = handle_topics(stripped, profile_store)
+            self.store.set_meta(self._key(chat_id, scope_id), "")  # flow complete
             return f"{reply}\n\n{_DONE}"
         return None

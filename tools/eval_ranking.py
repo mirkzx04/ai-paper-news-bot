@@ -127,7 +127,7 @@ def ndcg_at_k(scores, labels, k):
     return float((g * d).sum()) / idcg if idcg > 0 else float("nan")
 
 
-def load_preference_positives(path: str) -> list[tuple[str, str]]:
+def load_preference_positives(path: str, user_id: str | None = None) -> list[tuple[str, str]]:
     """Fold the user's exported seed positives into the eval as extra positives.
 
     Returns ``(arxiv_id, expect)`` pairs in the same shape as ``POSITIVES``.
@@ -140,15 +140,19 @@ def load_preference_positives(path: str) -> list[tuple[str, str]]:
     from preference_export import export_labels
     from src.store.preference_dataset import PreferenceDataset
 
-    labels = export_labels(PreferenceDataset(path))
+    labels = export_labels(PreferenceDataset(path), user_id=user_id)
     have = {aid for aid, _ in POSITIVES}
     return [(aid, "") for aid in labels["seed_positives"] if aid not in have]
 
 
-def main(preferences_path: str | None = None):
-    extra_pos = load_preference_positives(preferences_path) if preferences_path else []
+def main(preferences_path: str | None = None, preferences_user_id: str | None = None):
+    extra_pos = (
+        load_preference_positives(preferences_path, user_id=preferences_user_id)
+        if preferences_path else []
+    )
     if extra_pos:
-        print(f"preference export: +{len(extra_pos)} seed positives from {preferences_path}")
+        scope = f" for {preferences_user_id}" if preferences_user_id else ""
+        print(f"preference export: +{len(extra_pos)} seed positives from {preferences_path}{scope}")
     positives = POSITIVES + extra_pos
 
     fetched = fetch_by_ids([i for i, _ in SEEDS + positives + HARD_NEG])
@@ -237,5 +241,9 @@ if __name__ == "__main__":
              "dataset (default path: data/preferences.jsonl). Omit the flag to "
              "run on the hard-coded curated set only.",
     )
+    parser.add_argument(
+        "--preferences-user-id", default=None,
+        help="when --preferences is used, filter to one anonymous user id",
+    )
     args = parser.parse_args()
-    main(preferences_path=args.preferences)
+    main(preferences_path=args.preferences, preferences_user_id=args.preferences_user_id)

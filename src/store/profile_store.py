@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from pathlib import Path
 from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
@@ -255,3 +256,33 @@ def _remove_unique(target: list[str], items: list[str]) -> list[str]:
     removed = [value for value in target if value.lower() in wanted]
     target[:] = [value for value in target if value.lower() not in wanted]
     return removed
+
+
+class UserProfileStoreProvider:
+    """Factory for per-user profile overlays keyed by anonymous user ids.
+
+    A user id like ``u_abcd...`` maps to ``data/users/u_abcd.../profile_overlay.json``
+    when the base overlay is ``data/profile_overlay.json``. No username/nickname
+    is accepted or stored here.
+    """
+
+    def __init__(self, base_overlay_path: str = "data/profile_overlay.json",
+                 listener_factory: Callable[[str], Optional[ProfileListener]] | None = None) -> None:
+        self.base_overlay_path = Path(base_overlay_path)
+        self.listener_factory = listener_factory
+
+    @staticmethod
+    def _safe_user_id(user_id: str) -> str:
+        allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
+        safe = "".join(ch for ch in str(user_id) if ch in allowed)
+        if not safe:
+            raise ValueError("empty anonymous user id")
+        return safe
+
+    def path_for(self, user_id: str) -> str:
+        safe = self._safe_user_id(user_id)
+        return str(self.base_overlay_path.parent / "users" / safe / self.base_overlay_path.name)
+
+    def for_user(self, user_id: str) -> ProfileStore:
+        listener = self.listener_factory(user_id) if self.listener_factory else None
+        return ProfileStore(self.path_for(user_id), listener=listener)

@@ -306,6 +306,19 @@ class LoadOrBuildTest(unittest.TestCase):
             self.ds_path, emb, cache_path=self.cache, now=NOW)
         self.assertEqual(pos_v.shape[0], 1)
 
+    def test_filters_votes_by_anonymous_user_id(self) -> None:
+        ds = PreferenceDataset(self.ds_path)
+        ds.log({"type": "vote", "user_id": "u_1", "signal": "up",
+                "canonical_key": "arxiv:1", "text": "a"})
+        ds.log({"type": "vote", "user_id": "u_2", "signal": "down",
+                "canonical_key": "arxiv:2", "text": "b"})
+        emb = _CountingEmbedder()
+        pos_v, _, neg_v, _ = load_or_build_feedback_vectors(
+            ds, emb, cache_path=self.cache, now=NOW, user_id="u_1")
+        self.assertEqual(pos_v.shape[0], 1)
+        self.assertIsNone(neg_v)
+        self.assertEqual(emb.embedded_texts, ["a"])
+
     def test_no_votes_returns_all_none(self) -> None:
         ds = PreferenceDataset(self.ds_path)
         emb = _CountingEmbedder()

@@ -52,6 +52,18 @@ the ranking. With no votes, scoring is identical to the embedding-only baseline.
 Shown-but-unvoted papers are logged as `impression`s for evaluation only — they
 never feed scoring. All tunable under `feedback:` in `config/profile.yaml`.
 
+## Multi-user privacy
+
+Telegram profile edits and votes are scoped by an anonymous stable user id. The
+bot derives `u_<digest>` with HMAC-SHA256 from Telegram's numeric `from.id` and
+`USER_ID_SECRET` (fallbacks: `TELEGRAM_USER_ID_SALT`, then `TELEGRAM_BOT_TOKEN`).
+Runtime profiles live under `data/users/<user_id>/profile_overlay.json`, while
+`data/preferences.jsonl` stores only `user_id`; Telegram nicknames, usernames,
+display names and raw Telegram ids are not written to the preference dataset.
+
+For production, set `USER_ID_SECRET` to a long random value and keep it stable:
+changing it intentionally rotates all anonymous ids.
+
 ## Bot commands
 
 - **Onboarding** — `/creare_profile` walks you through seed papers → authors → topics.

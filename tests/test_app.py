@@ -342,6 +342,37 @@ class BuildPollerTest(unittest.TestCase):
         self.assertIs(poller.dispatcher.error_log, error_log)
 
 
+class BuildPipelineTest(unittest.TestCase):
+    def test_scopes_feedback_and_caches_to_anonymous_user(self) -> None:
+        cfg = SimpleNamespace(
+            sources={"arxiv": {"categories": ["cs.LG"], "max_results": 1, "lookback_days": 1}},
+            profile=SimpleNamespace(seed_arxiv_ids=("2101.03961",), seed_texts=()),
+            feedback=SimpleNamespace(
+                w_pos_max=0.6, tau_days=90, coldstart_k=10, cap_m=64,
+                baseline_neg=0.15, neg_lambda=0.35,
+            ),
+            thresholds=SimpleNamespace(digest=0.3, alert=0.6),
+            digest_cap=5,
+        )
+        dataset = object()
+        embedder = object()
+
+        with mock.patch.object(app, "SpecterEmbedder", return_value=embedder), \
+             mock.patch.object(app, "load_or_build", return_value=None) as load_profile, \
+             mock.patch.object(app, "load_or_build_feedback_vectors",
+                               return_value=(None, None, None, None)) as load_feedback:
+            app.build_pipeline(
+                cfg, FakeStore(), mock.Mock(), preference_dataset=dataset, user_id="u_abc",
+            )
+
+        self.assertIn(os.path.join("users", "u_abc", "profile_vector.json"),
+                      load_profile.call_args.args[2])
+        self.assertIs(load_feedback.call_args.args[0], dataset)
+        self.assertEqual(load_feedback.call_args.kwargs["user_id"], "u_abc")
+        self.assertIn(os.path.join("users", "u_abc", "feedback_vectors.json"),
+                      load_feedback.call_args.kwargs["cache_path"])
+
+
 class BuildNotifierTest(unittest.TestCase):
     def test_raises_value_error_without_telegram_credentials(self) -> None:
         # The framework-free contract: missing creds -> ValueError (the CLI then

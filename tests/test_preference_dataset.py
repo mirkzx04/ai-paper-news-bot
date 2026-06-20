@@ -76,6 +76,17 @@ class PreferenceDatasetTest(unittest.TestCase):
         self.assertEqual(self.ds.events(types=["vote"])[0]["signal"], "up")
         self.assertEqual(self.ds.events(types=["nonexistent"]), [])
 
+    def test_user_id_default_and_filtering(self) -> None:
+        user_ds = PreferenceDataset(self.path, user_id="u_1")
+        user_ds.log({"type": "vote", "signal": "up", "canonical_key": "a"})
+        self.ds.log({"type": "vote", "user_id": "u_2", "signal": "down", "canonical_key": "b"})
+
+        self.assertEqual([e["user_id"] for e in self.ds.events(types=["vote"])], ["u_1", "u_2"])
+        self.assertEqual(
+            [e["canonical_key"] for e in self.ds.events(types=["vote"], user_id="u_1")],
+            ["a"],
+        )
+
     def test_missing_type_defaults_to_unknown(self) -> None:
         self.ds.log({"kind": "keyword", "value": "moe"})
         self.assertEqual(self.ds.events()[0]["type"], "unknown")

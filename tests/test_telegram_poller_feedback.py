@@ -51,14 +51,15 @@ def _scored(item=None, total=0.8, breakdown=None) -> ScoredItem:
                       ScoreResult(total=total, breakdown=breakdown or {"keyword": 0.5}))
 
 
-def _cb_update(update_id, data, cq_id, reply_markup=None):
+def _cb_update(update_id, data, cq_id, reply_markup=None, from_id=7):
     message = {"message_id": 99, "chat": {"id": 7}}
     if reply_markup is not None:
         # Mirrors what Telegram echoes back on the callback's message; lets the
         # poller detect a no-op keyboard edit (skip an identical editMessageReplyMarkup).
         message["reply_markup"] = reply_markup
     return {"update_id": update_id,
-            "callback_query": {"id": cq_id, "data": data, "from": {"id": 7},
+            "callback_query": {"id": cq_id, "data": data,
+                               "from": {"id": from_id, "username": f"user{from_id}"},
                                "message": message}}
 
 
@@ -224,6 +225,14 @@ class NotifierImpressionTest(unittest.TestCase):
         self.assertAlmostEqual(imp["score"], 0.66)
         self.assertEqual(imp["breakdown"], {"keyword": 0.3, "embedding": 0.7})
         self.assertEqual(imp["route"], "alert")  # route == kind
+
+    def test_impression_can_carry_anonymous_user_id(self) -> None:
+        notifier = TelegramNotifier("TOK", "7", throttle=0,
+                                    preference_dataset=self.ds, user_id="u_anon")
+        notifier.notify([_scored()], kind="digest")
+        imp = self.ds.events(types=["impression"])[0]
+        self.assertEqual(imp["user_id"], "u_anon")
+        self.assertNotIn("username", imp)
 
     def test_one_impression_per_sent_paper(self) -> None:
         notifier = TelegramNotifier("TOK", "7", throttle=0, preference_dataset=self.ds)
@@ -439,6 +448,29 @@ class PollerDedupTest(PollerFeedbackBase):
         self._updates = [_cb_update(2, "fb:u:arxiv:k2", "B")]
         poller.poll_once()
         self.assertEqual(len(self.ds.events(types=["vote"])), 2)
+
+    def test_same_paper_votes_are_isolated_by_anonymous_user_id(self) -> None:
+        key = "arxiv:2401.same"
+        self.sent_items.record(key, text="t")
+        poller = TelegramPoller(
+            "TOK", _Dispatcher(), _Store(),
+            preference_dataset=self.ds, sent_items=self.sent_items,
+            user_id_resolver=lambda sender: f"u_{sender['id']}",
+        )
+
+        self._updates = [_cb_update(1, "fb:u:" + key, "A", from_id=7)]
+        poller.poll_once()
+        self._updates = [_cb_update(2, "fb:u:" + key, "B", from_id=8)]
+        poller.poll_once()
+
+        votes = self.ds.events(types=["vote"])
+        self.assertEqual([(v["user_id"], v["signal"]) for v in votes], [("u_7", "up"), ("u_8", "up")])
+        self.assertEqual(poller._current_vote_signal(key, user_id="u_7"), "up")
+        self.assertEqual(poller._current_vote_signal(key, user_id="u_8"), "up")
+        with open(self.ds.path, "r", encoding="utf-8") as fh:
+            raw = fh.read()
+        self.assertNotIn("user7", raw)
+        self.assertNotIn("user8", raw)
 
 
 class PollerAffordanceTest(PollerFeedbackBase):

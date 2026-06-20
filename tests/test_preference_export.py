@@ -140,6 +140,21 @@ class ExportLabelsTest(unittest.TestCase):
     def test_empty_dataset_has_empty_weak_negatives(self) -> None:
         self.assertEqual(export_labels(self.ds)["weak_negatives"], [])
 
+    def test_can_export_one_anonymous_user(self) -> None:
+        self.ds.log({"type": "profile_add", "user_id": "u_1",
+                     "kind": "seed", "value": "2101.03961"})
+        self.ds.log({"type": "profile_add", "user_id": "u_2",
+                     "kind": "seed", "value": "2201.02177"})
+        self.ds.log({"type": "vote", "user_id": "u_1", "signal": "up",
+                     "canonical_key": "arxiv:mine"})
+        self.ds.log({"type": "vote", "user_id": "u_2", "signal": "down",
+                     "canonical_key": "arxiv:other"})
+
+        labels = export_labels(self.ds, user_id="u_1")
+        self.assertEqual(labels["seed_positives"], ["2101.03961"])
+        self.assertEqual(labels["vote_positives"], ["arxiv:mine"])
+        self.assertEqual(labels["vote_negatives"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

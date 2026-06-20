@@ -339,6 +339,7 @@ def load_or_build_feedback_vectors(
     embedder,
     cache_path: str = "data/feedback_vectors.json",
     *,
+    user_id: str | None = None,
     now: datetime | None = None,
     w_pos_max: float = DEFAULT_W_POS_MAX,
     tau_days: float = DEFAULT_TAU_DAYS,
@@ -350,9 +351,11 @@ def load_or_build_feedback_vectors(
     """Convenience wrapper: read votes from a ``PreferenceDataset`` and build.
 
     ``dataset`` may be a :class:`~src.store.preference_dataset.PreferenceDataset`
-    (anything with ``.events(types=...)``) or a path string to the JSONL log.
-    ``now`` defaults to ``datetime.now(timezone.utc)`` *here* (the impure edge),
-    keeping the underlying :func:`build_feedback_vectors` deterministic.
+    (anything with ``.events(types=..., user_id=...)``) or a path string to the
+    JSONL log. ``user_id`` filters votes to one anonymous user; leave it ``None``
+    for the legacy all-events aggregate. ``now`` defaults to
+    ``datetime.now(timezone.utc)`` *here* (the impure edge), keeping the
+    underlying :func:`build_feedback_vectors` deterministic.
 
     Note: the weights depend on ``now`` (time decay), so unlike the seed-vector
     cache the *embeddings* are cached but the weights are recomputed every call.
@@ -364,7 +367,7 @@ def load_or_build_feedback_vectors(
     if now is None:
         now = datetime.now(timezone.utc)
 
-    events = dataset.events(types=["vote"])
+    events = dataset.events(types=["vote"], user_id=user_id)
     return build_feedback_vectors(
         events,
         embedder,

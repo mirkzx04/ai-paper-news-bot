@@ -38,7 +38,7 @@ class CommandDispatcher:
         # Sink for command failures; default to a fresh ErrorLog if not provided.
         self.error_log = error_log or ErrorLog()
 
-    def dispatch(self, text: str) -> str | None:
+    def dispatch(self, text: str, store: ProfileStore | None = None) -> str | None:
         text = (text or "").strip()
         if not text.startswith("/"):
             return None
@@ -52,7 +52,7 @@ class CommandDispatcher:
         if command is None:
             return f"Unknown command: /{name}\n\n{self.help_text()}"
         try:
-            return command.handle(args.strip(), self.store)
+            return command.handle(args.strip(), store or self.store)
         except Exception as exc:  # a bad command must not crash the poll loop
             logger.warning("command /%s failed: %s", name, exc)
             self.error_log.record(

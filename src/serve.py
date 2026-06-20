@@ -26,7 +26,7 @@ from src.env import load_env
 from src.flow.profile_flow import ProfileFlow
 from src.report_log import ReportLog
 from src.store.preference_dataset import PreferenceDataset, ProfileListener
-from src.store.profile_store import ProfileStore
+from src.store.profile_store import ProfileStore, UserProfileStoreProvider
 from src.store.sent_items_store import SentItemsStore
 from src.store.sqlite_store import SqliteStore
 from src.telegram_api import set_my_commands
@@ -71,11 +71,16 @@ def serve_forever(config_path: str = "config/profile.yaml",
     store = SqliteStore(db_path)
     preference_dataset = PreferenceDataset()
     profile_store = ProfileStore(overlay_path, listener=ProfileListener(preference_dataset))
+    user_profiles = UserProfileStoreProvider(
+        overlay_path,
+        listener_factory=lambda user_id: ProfileListener(preference_dataset, user_id=user_id),
+    )
     sent_items = SentItemsStore(db_path)
     flow = ProfileFlow(store, profile_store)
     poller = app.build_poller(token, store, profile_store, preference_dataset,
                               admin_chat_id=chat_id, report_log=ReportLog(),
-                              sent_items=sent_items, flow=flow)
+                              sent_items=sent_items, flow=flow,
+                              profile_store_provider=user_profiles)
 
     _register_menu(token)
 

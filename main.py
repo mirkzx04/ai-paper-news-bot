@@ -19,7 +19,7 @@ from src.env import load_env
 from src.flow.profile_flow import ProfileFlow
 from src.report_log import ReportLog
 from src.store.preference_dataset import PreferenceDataset, ProfileListener
-from src.store.profile_store import ProfileStore
+from src.store.profile_store import ProfileStore, UserProfileStoreProvider
 from src.store.sent_items_store import SentItemsStore
 from src.store.sqlite_store import SqliteStore
 from src.telegram_api import set_my_commands
@@ -86,6 +86,10 @@ def main() -> None:
     # it absent ProfileStore behaves exactly as before.
     preference_dataset = PreferenceDataset()
     profile_store = ProfileStore(args.overlay, listener=ProfileListener(preference_dataset))
+    user_profiles = UserProfileStoreProvider(
+        args.overlay,
+        listener_factory=lambda user_id: ProfileListener(preference_dataset, user_id=user_id),
+    )
 
     # Command-poll mode: read pending commands, mutate the overlay, reply, exit.
     if args.poll_commands:
@@ -97,7 +101,8 @@ def main() -> None:
         flow = ProfileFlow(store, profile_store)
         poller = app.build_poller(token, store, profile_store, preference_dataset,
                                   admin_chat_id=admin_chat_id, report_log=ReportLog(),
-                                  sent_items=sent_items, flow=flow)
+                                  sent_items=sent_items, flow=flow,
+                                  profile_store_provider=user_profiles)
         try:
             sent = poller.poll_once()
             poller.notify_new_errors()  # end-of-run push to admin; no-op if no new errors / no admin
