@@ -16,13 +16,16 @@ from src import app
 from src.app import build_commands, build_notifier, build_pipeline, enrich_author_ids
 from src.config import apply_profile_overlay, load_config
 from src.env import load_env
+from src.flood_control import SlidingWindowRateLimiter
 from src.flow.profile_flow import ProfileFlow
 from src.report_log import ReportLog
 from src.store.preference_dataset import PreferenceDataset, ProfileListener
 from src.store.profile_store import ProfileStore, UserProfileStoreProvider
 from src.store.sent_items_store import SentItemsStore
 from src.store.sqlite_store import SqliteStore
+from src.store.user_registry import UserRegistry
 from src.telegram_api import set_my_commands
+from src.user_identity import assert_strong_secret
 
 logger = logging.getLogger("main")
 
@@ -42,6 +45,9 @@ def main() -> None:
                         help="run as a long-running process: real-time long-poll + digest scheduler")
     parser.add_argument("--lookback-days", type=int, default=None,
                         help="override the source lookback window")
+    parser.add_argument("--all-users", action="store_true",
+                        help="send a per-user digest to every registered user "
+                             "(multi-user fan-out) instead of only the owner chat")
     parser.add_argument("--dry-run", action="store_true",
                         help="don't persist seen-ids (re-show items next run)")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -53,12 +59,16 @@ def main() -> None:
     )
 
     load_env()
+    # Public-deployment guard: require a strong USER_ID_SECRET in production
+    # (BOT_ENV=production / REQUIRE_USER_ID_SECRET=1); warn-only otherwise so
+    # local/dev stays frictionless.
+    assert_strong_secret()
 
     # Register the Telegram slash-command menu and exit.
     if args.register_menu:
         token = os.environ.get("TELEGRAM_BOT_TOKEN")
         if not token:
-            parser.error("--register-menu richiede TELEGRAM_BOT_TOKEN.")
+            parser.error("--register-menu requires TELEGRAM_BOT_TOKEN.")
         menu = [{"command": "creare_profile",
                  "description": "Set up your profile: read papers, authors, topics"}]
         menu += [{"command": c.name, "description": c.description[:256]} for c in build_commands()]
@@ -95,25 +105,49 @@ def main() -> None:
     if args.poll_commands:
         token = os.environ.get("TELEGRAM_BOT_TOKEN")
         if not token:
-            parser.error("--poll-commands richiede TELEGRAM_BOT_TOKEN (in .env o nell'ambiente).")
+            parser.error("--poll-commands requires TELEGRAM_BOT_TOKEN (in .env or the environment).")
         admin_chat_id = os.environ.get("TELEGRAM_CHAT_ID")  # owner = admin for /reports, /errors
         sent_items = SentItemsStore(args.db)  # resolves an incoming 👍/👎 back to its paper
         flow = ProfileFlow(store, profile_store)
+        # Multi-user: register every sender (anonymous id -> encrypted chat id) so
+        # the digest fan-out can reach them; bound per-user incoming command rate.
+        user_registry = UserRegistry()
+        flood_limiter = SlidingWindowRateLimiter()
         poller = app.build_poller(token, store, profile_store, preference_dataset,
                                   admin_chat_id=admin_chat_id, report_log=ReportLog(),
                                   sent_items=sent_items, flow=flow,
-                                  profile_store_provider=user_profiles)
+                                  profile_store_provider=user_profiles,
+                                  user_registry=user_registry, flood_limiter=flood_limiter)
         try:
             sent = poller.poll_once()
             poller.notify_new_errors()  # end-of-run push to admin; no-op if no new errors / no admin
-            print(f"comandi processati, risposte inviate: {sent}")
+            print(f"commands processed, replies sent: {sent}")
         finally:
             sent_items.close()
             store.close()
         return
 
-    # Pipeline mode: merge the user's runtime additions on top of the YAML seed,
-    # then resolve author ids via S2 (no-op without an API key).
+    now = datetime.now(timezone.utc)
+
+    # Multi-user fan-out: deliver a per-user digest to every registered user. Each
+    # user's overlay is applied INSIDE the fan-out, so the base YAML seed (cfg) is
+    # passed through unmerged here.
+    if args.all_users:
+        registry = UserRegistry()
+        try:
+            app.run_digest_for_all(
+                cfg, store, registry, preference_dataset, now=now,
+                lookback_override=args.lookback_days, dry_run=args.dry_run,
+                notifier_kind=args.notifier,
+            )
+        except app.MissingCredentialsError as exc:
+            parser.error(str(exc))
+        finally:
+            store.close()
+        return
+
+    # Pipeline mode (single-user / owner): merge the user's runtime additions on
+    # top of the YAML seed, then resolve author ids via S2 (no-op without a key).
     cfg = apply_profile_overlay(cfg, profile_store)
     cfg = replace(cfg, profile=enrich_author_ids(cfg.profile))
 
@@ -122,7 +156,6 @@ def main() -> None:
     # long-running serve loop reuses it verbatim. main owns the store's lifecycle:
     # run_digest_once never closes it (the serve loop reuses it across ticks), so
     # we close it here on every path — skip (None), success, or re-raised failure.
-    now = datetime.now(timezone.utc)
     try:
         app.run_digest_once(
             cfg, store, profile_store, preference_dataset,

@@ -24,6 +24,24 @@ _GIST_FILE = "state.b64"
 _DATA_DIR = "data"
 _API = "https://api.github.com/gists/{gist_id}"
 
+# GitHub's gist API inlines a file's content in the JSON response only up to ~1 MB;
+# beyond that it sets ``truncated`` and you must fetch ``raw_url`` (handled on pull).
+# More importantly, a single gist file has a hard size ceiling, so the whole-state
+# tar+base64 approach does NOT scale to many users (each adds a profile-vector and
+# feedback-vector cache). We guard the PATCH: warn past 80% and FAIL past the limit
+# rather than silently corrupting/truncating state.
+#
+# UPGRADE PATH when this limit is hit: stop tarring all of data/ into one blob —
+# split per-user caches into separate gist files (or many gists), or move the large
+# vector caches to external object storage (S3/R2) and keep only small metadata in
+# the gist. Until then this guardrail makes the scaling wall loud and obvious.
+_GIST_INLINE_LIMIT = 990_000   # ~0.99 MB of base64 chars (safely under ~1 MB)
+_GIST_WARN_RATIO = 0.80
+
+
+class StateTooLargeError(RuntimeError):
+    """Raised by :func:`push` when the encoded state would exceed the gist limit."""
+
 
 def _headers(token: str) -> dict:
     return {"Authorization": f"token {token}", "Accept": "application/vnd.github+json"}
@@ -57,6 +75,19 @@ def push(gist_id: str, token: str) -> None:
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
         tar.add(_DATA_DIR, arcname=_DATA_DIR)
     encoded = base64.b64encode(buf.getvalue()).decode("ascii")
+    # Guardrail: never PATCH a blob that would overflow the gist's single-file
+    # limit (which would corrupt/truncate everyone's state). Warn as we approach it.
+    size = len(encoded)
+    if size >= _GIST_INLINE_LIMIT:
+        raise StateTooLargeError(
+            f"state is {size} b64 chars, over the ~{_GIST_INLINE_LIMIT} gist limit. "
+            "The single-gist whole-state store does not scale to this many users — "
+            "split per-user caches into separate files/gists or move vector caches "
+            "to external object storage (see tools/state_store.py for the upgrade path)."
+        )
+    if size >= _GIST_INLINE_LIMIT * _GIST_WARN_RATIO:
+        print(f"state_store: WARNING state is {size} b64 chars, "
+              f"{size * 100 // _GIST_INLINE_LIMIT}% of the gist limit — plan the upgrade.")
     resp = requests.patch(
         _API.format(gist_id=gist_id), headers=_headers(token),
         json={"files": {_GIST_FILE: {"content": encoded}}}, timeout=30,

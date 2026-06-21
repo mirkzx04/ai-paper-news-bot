@@ -18,6 +18,7 @@ import requests
 
 from src.notify.base import Notifier, ScoredItem
 from src.store.sent_items_store import token_for_key
+from src.telegram_api import PERMANENT_SEND_STATUSES, PermanentSendError
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +85,7 @@ class TelegramNotifier(Notifier):
         sent_items=None,         # optional SentItemsStore: enables 👍/👎 buttons
         preference_dataset=None,  # optional PreferenceDataset: enables impression logging
         user_id: str | None = None,  # optional anonymous user id for impression events
+        rate_limiter=None,       # optional shared RateLimiter: paces sends across users
         max_retries: int = _DEFAULT_MAX_RETRIES,        # total send attempts on HTTP 429
         retry_after_cap: float = _DEFAULT_RETRY_AFTER_CAP,  # max seconds to honour per 429
     ) -> None:
@@ -110,12 +112,22 @@ class TelegramNotifier(Notifier):
         # impressions never influence ranking (see src/embedding/feedback_vectors).
         self.preference_dataset = preference_dataset
         self.user_id = user_id
+        # When None, sends are paced by the blunt per-message ``time.sleep(throttle)``
+        # exactly as before. When a shared ``RateLimiter`` is injected (one per
+        # digest run, passed to every per-user notifier) it enforces BOTH the
+        # per-chat (~1 msg/s) AND the global (~30 msg/s) Telegram caps across all
+        # users, and the per-message sleep is dropped in its favour.
+        self.rate_limiter = rate_limiter
 
     def notify(self, scored: list[ScoredItem], *, kind: str) -> None:
         if not scored:
             return
         ordered = sorted(scored, key=lambda x: x.result.total, reverse=True)
         for s in ordered:
+            # Pace BEFORE sending: the shared limiter honours the global+per-chat
+            # caps; without one we keep the legacy post-send throttle below.
+            if self.rate_limiter is not None:
+                self.rate_limiter.acquire(self.chat_id)
             markup = self._feedback_markup(s) if self.sent_items is not None else None
             resp = self._send(self._format(s, kind), reply_markup=markup)
             # Best-effort: record the shown paper so the (much later) 👍/👎 tap can
@@ -128,7 +140,8 @@ class TelegramNotifier(Notifier):
             # impression must mean the user really saw the paper. Best-effort.
             if self.preference_dataset is not None and resp is not None:
                 self._record_impression(s, kind)
-            time.sleep(self.throttle)
+            if self.rate_limiter is None:
+                time.sleep(self.throttle)
 
     def _feedback_markup(self, s: ScoredItem) -> dict:
         """Single-row inline keyboard: 👍 / 👎, each carrying its callback token."""
@@ -267,6 +280,15 @@ class TelegramNotifier(Notifier):
                     self.max_retries,
                 )
                 return None
+
+            # Permanent failure (e.g. 403 — user blocked the bot / chat gone):
+            # raise so the per-user fan-out can mark this user blocked and stop
+            # sending to them. Distinct from a transient failure (which returns
+            # None and is retried on the next run).
+            if resp.status_code in PERMANENT_SEND_STATUSES:
+                logger.warning("telegram send permanently failed %s: %s",
+                               resp.status_code, resp.text[:200])
+                raise PermanentSendError(resp.status_code, self.chat_id, resp.text[:200])
 
             # Any other non-200 status: unchanged behaviour (warn + give up).
             logger.warning("telegram send failed %s: %s", resp.status_code, resp.text[:200])

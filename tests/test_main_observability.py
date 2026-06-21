@@ -41,7 +41,7 @@ class HeartbeatTextTest(unittest.TestCase):
         # The owner must be able to read all four load-bearing counts at a glance.
         self.assertIn("3 alert", text)
         self.assertIn("7 digest", text)
-        self.assertIn("42 nuovi", text)
+        self.assertIn("42 new", text)
         self.assertIn("2 scoring-error", text)
 
     def test_zero_run_is_still_a_valid_heartbeat(self) -> None:

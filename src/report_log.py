@@ -15,9 +15,16 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
+# Anti-flood caps for a public bot: bound how many reports a single anonymous
+# user can accumulate, and drop a report identical to that user's most recent one.
+_MAX_REPORTS_PER_USER = 50
+
+
 class ReportLog:
-    def __init__(self, path: str = "data/reports.json") -> None:
+    def __init__(self, path: str = "data/reports.json",
+                 max_per_user: int = _MAX_REPORTS_PER_USER) -> None:
         self.path = Path(path)
+        self.max_per_user = int(max_per_user)
 
     def _read(self) -> list:
         """Load the existing report list; return [] on any read/parse problem."""
@@ -53,19 +60,42 @@ class ReportLog:
         """Total number of stored reports. Missing/corrupt file -> 0. NEVER raises."""
         return len(self._read())
 
-    def add(self, text: str) -> None:
-        """Append a timestamped report record to the JSON list. NEVER raises."""
+    def add(self, text: str, user_id: str | None = None) -> bool:
+        """Append a timestamped report record to the JSON list. NEVER raises.
+
+        `user_id` (optional anonymous ``u_<id>``) enables anti-flood guards for a
+        public bot: a report identical to that user's most recent one is dropped
+        (dedup), and a user already at ``max_per_user`` reports is rejected. The
+        on-disk record stays backward compatible — ``user_id`` is added only when
+        supplied. Returns True if the report was stored, False if it was dropped by
+        a guard or a write error.
+        """
         try:
             records = self._read()
+            if user_id is not None:
+                user_records = [r for r in records
+                                if isinstance(r, dict) and r.get("user_id") == user_id]
+                # Dedup: skip an exact repeat of this user's latest report.
+                if user_records and str(user_records[-1].get("report", "")) == str(text):
+                    logger.info("report: dropping duplicate from %s", user_id)
+                    return False
+                # Cap: refuse once a user has flooded the log.
+                if len(user_records) >= self.max_per_user:
+                    logger.warning("report: %s at cap (%d); dropping", user_id, self.max_per_user)
+                    return False
             record = {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "report": text,
             }
+            if user_id is not None:
+                record["user_id"] = user_id
             records.append(record)
 
             # Ensure the parent directory exists before writing.
             self.path.parent.mkdir(parents=True, exist_ok=True)
             with self.path.open("w", encoding="utf-8") as fh:
                 json.dump(records, fh, indent=2, ensure_ascii=False)
+            return True
         except Exception as exc:  # noqa: BLE001 — must never propagate to the caller.
             logger.error("Failed to write report to %s: %s", self.path, exc)
+            return False

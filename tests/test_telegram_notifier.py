@@ -173,6 +173,17 @@ class SendRetryOn429Test(unittest.TestCase):
         self.assertEqual(len(stub.calls), 1)
         self.mock_sleep.assert_not_called()
 
+    def test_403_raises_permanent_send_error(self) -> None:
+        # A 403 (user blocked the bot / chat gone) is PERMANENT: raise so the
+        # fan-out can mark the user blocked, instead of returning None.
+        forbidden = _FakeResp(403, {"ok": False}, text="Forbidden: bot was blocked by the user")
+        tn.requests = _RequestsStub([forbidden])
+        notifier = self._notifier()
+        with self.assertRaises(tn.PermanentSendError) as ctx:
+            notifier._send("hi")
+        self.assertEqual(ctx.exception.status, 403)
+        self.assertEqual(ctx.exception.chat_id, "123")
+
 
 class NotifyThrottleTest(unittest.TestCase):
     """The default throttle is 1.0s and `notify` sleeps it between messages."""

@@ -17,9 +17,9 @@ from src.store.profile_store import ProfileStore
 
 # Human-readable label per canonical value (used in confirmations/listings).
 _LABELS = {
-    "2x_daily": "2× al giorno",
-    "daily": "1× al giorno",
-    "weekly": "1× a settimana",
+    "2x_daily": "2× per day",
+    "daily": "1× per day",
+    "weekly": "1× per week",
 }
 
 # Synonym -> canonical. Keys are lowercased; lookup lowercases the input too.
@@ -55,10 +55,10 @@ _SYNONYMS = {
 def _options_block() -> str:
     """The list of accepted cadences with example usage, for help/error replies."""
     return (
-        "Opzioni disponibili:\n"
-        "• 2× al giorno — es. /set_frequency 2x  (canonico: 2x_daily)\n"
-        "• 1× al giorno — es. /set_frequency daily  (canonico: daily)\n"
-        "• 1× a settimana — es. /set_frequency weekly  (canonico: weekly)"
+        "Available options:\n"
+        "• 2× per day — e.g. /set_frequency 2x  (canonical: 2x_daily)\n"
+        "• 1× per day — e.g. /set_frequency daily  (canonical: daily)\n"
+        "• 1× per week — e.g. /set_frequency weekly  (canonical: weekly)"
     )
 
 
@@ -74,7 +74,7 @@ class SetFrequencyCommand(Command):
             current = store.digest_frequency
             label = _LABELS.get(current, current)
             return (
-                f"Frequenza attuale del digest: {label} ({current}).\n\n"
+                f"Current digest frequency: {label} ({current}).\n\n"
                 f"{_options_block()}"
             )
 
@@ -84,7 +84,7 @@ class SetFrequencyCommand(Command):
         canonical = _SYNONYMS.get(key)
         if canonical is None:
             return (
-                f"Frequenza non riconosciuta: «{raw}».\n\n"
+                f"Unrecognized frequency: «{raw}».\n\n"
                 f"{_options_block()}"
             )
 
@@ -92,8 +92,8 @@ class SetFrequencyCommand(Command):
         # but we honor its boolean contract rather than assume.
         if not store.set_digest_frequency(canonical):
             return (
-                f"Impossibile impostare la frequenza: «{raw}».\n\n"
+                f"Couldn't set the frequency: «{raw}».\n\n"
                 f"{_options_block()}"
             )
 
-        return f"✅ Frequenza impostata: {_LABELS[canonical]} ({canonical})"
+        return f"✅ Frequency set: {_LABELS[canonical]} ({canonical})"

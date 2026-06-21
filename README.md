@@ -52,25 +52,73 @@ the ranking. With no votes, scoring is identical to the embedding-only baseline.
 Shown-but-unvoted papers are logged as `impression`s for evaluation only — they
 never feed scoring. All tunable under `feedback:` in `config/profile.yaml`.
 
-## Multi-user privacy
+## Multi-user delivery
 
-Telegram profile edits and votes are scoped by an anonymous stable user id. The
-bot derives `u_<digest>` with HMAC-SHA256 from Telegram's numeric `from.id` and
-`USER_ID_SECRET` (fallbacks: `TELEGRAM_USER_ID_SALT`, then `TELEGRAM_BOT_TOKEN`).
-Runtime profiles live under `data/users/<user_id>/profile_overlay.json`, while
-`data/preferences.jsonl` stores only `user_id`; Telegram nicknames, usernames,
-display names and raw Telegram ids are not written to the preference dataset.
+The bot is fully multi-user. Anyone who messages it is recorded in a **delivery
+registry** (`data/user_registry.json`) and receives their *own* per-user digest:
+their own profile overlay, their own 👍/👎 feedback vectors, their own
+`/set_frequency` cadence, and their own independent "seen" set. Delivery fans out
+over all active users (`main.py --notifier telegram --all-users`, used by the cron
+workflow); a single shared SPECTER embedder + a shared rate limiter keep the
+fan-out within Telegram's per-chat (~1 msg/s) and global (~30 msg/s) limits and
+embed each candidate paper once. One user's failure never aborts the run, and a
+user who blocks the bot (HTTP 403) is automatically marked `blocked` and skipped.
 
-For production, set `USER_ID_SECRET` to a long random value and keep it stable:
-changing it intentionally rotates all anonymous ids.
+## Privacy policy
+
+Your privacy is a first-class design constraint, because your preferences are used
+to build a training dataset.
+
+- **Anonymous identity only.** You are identified solely by an anonymous id
+  `u_<digest>`, derived with HMAC-SHA256 from your numeric Telegram id and a
+  server secret (`USER_ID_SECRET`). Your **nickname, username, display name and
+  raw Telegram id are never stored** with your preferences.
+- **What the dataset contains.** Your profile edits, 👍/👎 votes and impressions
+  are appended to `data/preferences.jsonl` keyed by that anonymous id and nothing
+  else. **These preferences will be used to train a RankNet** (a learning-to-rank
+  model) to power a more accurate recommendation system in the future.
+- **Delivery data is separate and encrypted.** To send your digest the bot needs a
+  routable Telegram chat id. That id lives *only* in a separate delivery registry
+  (`data/user_registry.json`), **encrypted at rest** (when `USER_ID_SECRET` /
+  `REGISTRY_SECRET` is set), and is **never written into the training dataset**.
+- **Your controls.** `/stop` unsubscribes you (digests stop; your data is kept).
+  `/delete_me` erases everything the bot holds about you — your profile, your
+  feedback history (your rows in the dataset), and your delivery entry.
+- **Production setup.** Set `USER_ID_SECRET` to a long random value and keep it
+  stable (changing it rotates all anonymous ids). Set `BOT_ENV=production` (or
+  `REQUIRE_USER_ID_SECRET=1`) to make the bot refuse to start with a missing or
+  weak secret.
 
 ## Bot commands
 
-- **Onboarding** — `/creare_profile` walks you through seed papers → authors → topics.
-- **Profile** — `/add_author`, `/add_keywords`, `/add_topic`, `/add_conference` (and `/remove_*`).
-- **Misc** — `/report <text>` (flag a bug or inaccuracy), `/clear` (wipe recent bot messages).
-- **Owner-only** — `/reports`, `/errors` surface the saved user reports and runtime
-  errors; the bot also pushes a summary when a run logs new errors.
+Full command map (every command the bot understands):
+
+| Command | Description |
+| --- | --- |
+| `/start` | Welcome message + the privacy notice. |
+| `/privacy` | Show the privacy policy (what's stored, the RankNet use, your controls). |
+| `/creare_profile` | Onboarding flow: read papers → authors → topics. |
+| `/annulla` (`/cancel`) | Abort an in-progress onboarding flow. |
+| `/add_author <name…>` | Add one or more followed authors (a followed author always alerts). |
+| `/add_keywords <kw…>` | Add interest keywords. |
+| `/add_topic <name>: <kw…>` | Create/extend a named topic with keywords. |
+| `/add_conference <name…>` | Add conferences/venues of interest. |
+| `/remove_author <name…>` | Remove followed authors. |
+| `/remove_keywords <kw…>` | Remove interest keywords. |
+| `/remove_topic <name>` | Remove a topic (or specific keywords from it). |
+| `/remove_conference <name…>` | Remove conferences/venues. |
+| `/set_frequency <2x \| daily \| weekly>` | Choose how often you receive the digest. |
+| `/report <text>` | Report a bug, inaccuracy, or feature request. |
+| `/clear` | Delete recent bot messages from your chat. |
+| `/stop` | Unsubscribe — stop digests (your data is kept). |
+| `/delete_me` | Erase everything the bot holds about you (right to erasure). |
+| `/reports` *(owner)* | Show saved user reports. |
+| `/errors` *(owner)* | Show recent runtime errors. |
+
+Every recommended paper carries inline **👍 / 👎** buttons; tapping logs a vote
+(re-tapping your own vote withdraws it). Owner-only commands are silently ignored
+for non-owners (no hint they exist), and incoming commands are flood-controlled
+per user.
 
 ## Roadmap
 
@@ -79,7 +127,11 @@ changing it intentionally rotates all anonymous ids.
 - [x] **Phase 2** — SPECTER embeddings + profile vector + similarity ranking
 - [x] **Phase 3a** — 👍/👎 feedback loop (inline buttons, preference dataset, eval hook)
 - [x] **Deploy** — GitHub Actions cron + private-gist state store
+- [x] **Multi-user** — per-user delivery + registry, GDPR (`/stop`, `/delete_me`),
+  flood control, encrypted chat-id at rest, shared embedder + rate limiter
 - [ ] **Phase 3b** — Bluesky + Hugging Face Papers sources
+- [ ] **RankNet** — train a learning-to-rank model on the collected preference dataset
+- [ ] **Scale** — move per-user vector caches off the single gist (state guardrail in place)
 
 ## Run (local)
 
@@ -102,8 +154,9 @@ cp .env.example .env                       # fill TELEGRAM_BOT_TOKEN + chat id
 python tools/telegram_setup.py
 python tools/telegram_setup.py --send-test # verify delivery
 python main.py --register-menu             # register the slash-command menu
-python main.py --poll-commands -v          # process incoming commands + 👍/👎 votes
-python main.py --notifier telegram -v      # send matched papers (with vote buttons)
+python main.py --poll-commands -v          # process incoming commands + 👍/👎 votes (registers users)
+python main.py --notifier telegram -v      # send the owner's digest (single-user)
+python main.py --notifier telegram --all-users -v  # fan out a per-user digest to every registered user
 ```
 
 ## Deploy (GitHub Actions)
@@ -121,8 +174,9 @@ To deploy from scratch:
    e.g. `init`). Copy the gist id from its URL → `GIST_ID`.
 2. **Create a Personal Access Token** with the `gist` scope → `GIST_TOKEN`.
 3. **Set the GitHub Actions Secrets** (repo *Settings → Secrets and variables →
-   Actions*): `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `GIST_ID`, `GIST_TOKEN`
-   (plus the optional `SEMANTIC_SCHOLAR_API_KEY`).
+   Actions*): `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `GIST_ID`, `GIST_TOKEN`,
+   `USER_ID_SECRET` (a long random value — required for the public multi-user
+   deployment), and optionally `REGISTRY_SECRET` and `SEMANTIC_SCHOLAR_API_KEY`.
 4. The workflow then runs **twice a day**; trigger it on demand from the *Actions*
    tab with **Run workflow** (`workflow_dispatch`).
 5. **Before trusting the cron, validate end-to-end:** follow the runbook in

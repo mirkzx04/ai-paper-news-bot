@@ -11,6 +11,28 @@ logger = logging.getLogger(__name__)
 
 _BASE = "https://api.telegram.org/bot{token}/{method}"
 
+# HTTP statuses Telegram returns for a chat that can never be delivered to again
+# (the user blocked the bot, deactivated their account, or the chat was deleted).
+# These are PERMANENT, not transient: a registry should mark the user blocked
+# rather than retry. 400 is included only for the specific "chat not found" body,
+# handled by the caller; here we treat 403 as the unambiguous permanent signal.
+PERMANENT_SEND_STATUSES = frozenset({403})
+
+
+class PermanentSendError(Exception):
+    """A send failed permanently — the chat is unreachable (e.g. user blocked bot).
+
+    Carries the offending ``status`` and ``chat_id`` so a caller (the per-user
+    digest fan-out) can mark that user ``blocked`` in the registry and stop
+    sending to them, distinct from a transient failure that should be retried.
+    """
+
+    def __init__(self, status: int, chat_id, detail: str = "") -> None:
+        self.status = status
+        self.chat_id = chat_id
+        self.detail = detail
+        super().__init__(f"permanent send failure {status} to chat {chat_id}: {detail}")
+
 
 def send_message(token: str, chat_id, text: str, parse_mode: str | None = None,
                  reply_markup: dict | None = None,
