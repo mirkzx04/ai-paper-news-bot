@@ -16,8 +16,11 @@ import requests
 
 from src.commands.dispatch import CommandDispatcher
 from src.error_log import ErrorLog
+from src.flood_control import MAX_COMMAND_LEN, MAX_REPORT_LEN, clamp_text
+from src.privacy import erase_user
 from src.report_log import ReportLog
 from src.store.base import Store
+from src.store.user_registry import STATUS_INACTIVE
 from src.telegram_api import (
     answer_callback_query,
     delete_message,
@@ -31,6 +34,33 @@ logger = logging.getLogger(__name__)
 
 _OFFSET_KEY = "telegram_offset"
 _CLEAR_COMMAND = "clear"
+# Identity/privacy commands handled in the poller (not the dispatcher) because
+# they need the sender's chat id and anonymous user id + the registry.
+_START_COMMAND = "start"
+_PRIVACY_COMMAND = "privacy"
+_DELETE_ME_COMMAND = "delete_me"
+_STOP_COMMAND = "stop"
+_REPORT_COMMAND = "report"
+
+# The privacy policy surfaced to users on /start, /privacy and onboarding. Kept in
+# one place so the bot's runtime copy and the README policy stay in sync.
+PRIVACY_NOTICE = (
+    "🔒 <b>Privacy</b>\n"
+    "You're identified only by an <b>anonymous id</b> derived from your Telegram "
+    "id — your name, username and raw Telegram id are <b>never</b> stored with your "
+    "preferences. Your interest profile and 👍/👎 feedback are saved against that "
+    "anonymous id and will be used to train a recommendation model (a RankNet) to "
+    "improve suggestions in the future. The chat id needed to deliver your digest "
+    "is kept in a separate, encrypted store, never mixed into that dataset.\n\n"
+    "• /stop — unsubscribe (stop digests; your data is kept)\n"
+    "• /delete_me — erase everything the bot holds about you"
+)
+_WELCOME = (
+    "👋 Welcome! I surface new AI papers matched to your interests, with 👍/👎 "
+    "feedback that tunes your recommendations.\n\n"
+    "Send /creare_profile to set up your profile, or /privacy to see how your data "
+    "is handled."
+)
 
 # Inline 👍/👎 feedback callback_data: "fb:<u|d>:<token>" (see TelegramNotifier).
 # The token is the paper's canonical key, or a short hash when the key would
@@ -42,8 +72,8 @@ _FEEDBACK_PREFIX = "fb:"
 _FEEDBACK_SIGNALS = {"u": "up", "d": "down"}
 # Toasts shown to the user after a vote (answerCallbackQuery `text`). "none" is
 # the toggle-off (re-tapping your own vote withdraws it).
-_FEEDBACK_TOASTS = {"up": "👍 registrato", "down": "👎 registrato",
-                    "none": "↩️ voto rimosso"}
+_FEEDBACK_TOASTS = {"up": "👍 saved", "down": "👎 saved",
+                    "none": "↩️ vote removed"}
 
 # Affordance: after a vote we re-render the inline keyboard so the chosen option
 # is visibly marked (a ✅ before it) and the other stays neutral; a toggle-off
@@ -103,6 +133,7 @@ class TelegramPoller:
                  flow=None, error_log: ErrorLog | None = None,
                  report_log: ReportLog | None = None, admin_chat_id: str | None = None,
                  preference_dataset=None, sent_items=None, profile_store_provider=None,
+                 user_registry=None, flood_limiter=None,
                  user_id_resolver=telegram_user_id,
                  timeout: int = 20) -> None:
         self.token = token
@@ -120,6 +151,11 @@ class TelegramPoller:
         self.preference_dataset = preference_dataset
         self.sent_items = sent_items
         self.profile_store_provider = profile_store_provider
+        # Multi-user delivery directory (anonymous id -> encrypted chat id). When
+        # None the poller doesn't register anyone — identical to prior behaviour.
+        self.user_registry = user_registry
+        # Per-user incoming-command flood control. When None there's no limiting.
+        self.flood_limiter = flood_limiter
         self.user_id_resolver = user_id_resolver
         # str() the chat id so a numeric env value and Telegram's int id compare
         # equal; None disables the owner-only commands (they fall through to the
@@ -137,6 +173,19 @@ class TelegramPoller:
         except Exception as exc:  # noqa: BLE001 - identity failure must not break polling
             logger.warning("anonymous user id resolution failed: %s", exc)
             return None
+
+    def _register(self, user_id: str | None, chat_id) -> None:
+        """Record/refresh (anonymous id -> chat id) in the delivery registry.
+
+        Best-effort and feature-gated: a missing registry, missing id, or a
+        registry error never breaks the poll (the registry is itself defensive).
+        """
+        if self.user_registry is None or user_id is None or chat_id is None:
+            return
+        try:
+            self.user_registry.register(user_id, chat_id)
+        except Exception as exc:  # noqa: BLE001 - registration must not break polling
+            logger.warning("user registration failed for %s: %s", user_id, exc)
 
     def _profile_store_for(self, user_id: str | None):
         if self.profile_store_provider is None or user_id is None:
@@ -195,6 +244,10 @@ class TelegramPoller:
             # client's spinner stops, but nothing is logged.
             callback = update.get("callback_query")
             if callback is not None:
+                # A vote is also a sign of life: register the sender so they
+                # receive digests even if they only ever tap buttons.
+                cb_chat = (callback.get("message") or {}).get("chat") or {}
+                self._register(self._user_id_from_sender(callback.get("from")), cb_chat.get("id"))
                 try:
                     self._handle_callback_query(callback)
                 except Exception as exc:  # never let one bad callback kill the poll
@@ -208,6 +261,15 @@ class TelegramPoller:
             active_profile_store = self._profile_store_for(user_id)
             text = message.get("text")
             if not text or not chat:
+                continue
+            # Public-bot hardening: bound oversized inputs, then register the
+            # sender and enforce per-user flood control. An over-limit user is
+            # silently ignored (no reply) so a flood can't amplify into a reply
+            # storm; registration still happened so they keep getting digests.
+            text = clamp_text(text, MAX_COMMAND_LEN)
+            self._register(user_id, chat["id"])
+            if self.flood_limiter is not None and not self.flood_limiter.allow(user_id):
+                logger.info("flood control: dropping message from %s", user_id)
                 continue
             # Whole-message handling is guarded so one bad message (a flow/clear
             # bug) can't crash the poll. The dispatcher already catches command
@@ -231,6 +293,14 @@ class TelegramPoller:
                         send_message(self.token, chat["id"], admin_reply, parse_mode="HTML")
                         replies_sent += 1
                         continue
+                # Identity/privacy commands (/start, /privacy, /stop, /delete_me,
+                # /report) need the sender's chat id + anonymous user id, so they
+                # are handled here rather than in the dispatcher.
+                identity_reply = self._handle_identity_command(text, user_id)
+                if identity_reply is not None:
+                    send_message(self.token, chat["id"], identity_reply, parse_mode="HTML")
+                    replies_sent += 1
+                    continue
                 # The profile-creation flow gets first refusal (it owns
                 # /creare_profile and any mid-onboarding chat); else command dispatch.
                 if self.flow is not None:
@@ -453,6 +523,67 @@ class TelegramPoller:
             if ev.get("canonical_key") == canonical_key:
                 latest = ev.get("signal")
         return latest
+
+    # -------------------------------------------------- identity / privacy --
+    def _handle_identity_command(self, text: str, user_id: str | None) -> str | None:
+        """Route an identity/privacy command to its handler; None if not one.
+
+        Handles /start, /privacy, /stop, /delete_me and /report — all of which
+        need the sender's anonymous ``user_id`` and/or the registry, which the
+        dispatcher doesn't have. Parsing mirrors the dispatcher (strip slash,
+        first token, drop @botname, lower-case); the remainder is the argument.
+        """
+        text = (text or "").strip()
+        if not text.startswith("/"):
+            return None
+        head, _, args = text[1:].partition(" ")
+        name = head.split("@", 1)[0].lower()
+
+        if name == _START_COMMAND:
+            return f"{_WELCOME}\n\n{PRIVACY_NOTICE}"
+        if name == _PRIVACY_COMMAND:
+            return PRIVACY_NOTICE
+        if name == _REPORT_COMMAND:
+            return self._handle_report(args, user_id)
+        if name == _STOP_COMMAND:
+            return self._handle_stop(user_id)
+        if name == _DELETE_ME_COMMAND:
+            return self._handle_delete_me(user_id)
+        return None
+
+    def _handle_report(self, args: str, user_id: str | None) -> str:
+        """Store a /report with anti-flood guards (input cap + per-user dedup/cap)."""
+        body = clamp_text((args or "").strip(), MAX_REPORT_LEN)
+        if not body:
+            return ("Usage: /report <your message> — describe the bug, inaccuracy, "
+                    "or feature you have in mind.")
+        stored = self.report_log.add(body, user_id=user_id)
+        if not stored:
+            return "You've sent this already (or too many reports) — not saved again."
+        return "Thanks! Your report has been received and saved — I appreciate the feedback."
+
+    def _handle_stop(self, user_id: str | None) -> str:
+        """Unsubscribe: mark the user inactive (digests stop; data is retained)."""
+        if self.user_registry is not None and user_id is not None:
+            self.user_registry.set_status(user_id, STATUS_INACTIVE)
+        return ("🛑 You're unsubscribed — I won't send you digests anymore. Your "
+                "data is kept; send /delete_me to erase it, or message me again to "
+                "resume.")
+
+    def _handle_delete_me(self, user_id: str | None) -> str:
+        """Erase everything the bot holds about the user (right to erasure)."""
+        if user_id is None:
+            return "Couldn't identify you, so there's nothing to erase."
+        prefs_path = str(self.preference_dataset.path) if self.preference_dataset is not None \
+            else "data/preferences.jsonl"
+        overlay_path = (str(self.profile_store_provider.base_overlay_path)
+                        if self.profile_store_provider is not None
+                        else "data/profile_overlay.json")
+        summary = erase_user(user_id, registry=self.user_registry,
+                             base_overlay_path=overlay_path, preferences_path=prefs_path)
+        return ("🗑 Done — I erased your profile, your feedback history "
+                f"({summary['preference_rows']} record(s)) and your delivery entry. "
+                "You're fully removed; message me again anytime to start fresh.")
 
     # ----------------------------------------------------------------- admin --
     def _is_admin(self, chat_id) -> bool:

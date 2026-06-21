@@ -356,7 +356,7 @@ class PollerVoteWritingTest(PollerFeedbackBase):
         self.assertAlmostEqual(v["score"], 0.71)
         self.assertEqual(v["breakdown"], {"keyword": 0.2, "author": 1.0})
         # The spinner was stopped with the right toast.
-        self.assertEqual(self.acks, [("CB1", "👍 registrato")])
+        self.assertEqual(self.acks, [("CB1", "👍 saved")])
 
     def test_down_vote_toast(self) -> None:
         key = "arxiv:2401.00010"
@@ -365,7 +365,7 @@ class PollerVoteWritingTest(PollerFeedbackBase):
         self._updates = [_cb_update(1, "fb:d:" + key, "CB")]
         poller.poll_once()
         self.assertEqual(self.ds.events(types=["vote"])[0]["signal"], "down")
-        self.assertEqual(self.acks[-1], ("CB", "👎 registrato"))
+        self.assertEqual(self.acks[-1], ("CB", "👎 saved"))
 
     def test_unknown_token_still_logs_signal_with_nones(self) -> None:
         # Vote arrives after the row was pruned: the preference signal is NOT lost.
@@ -378,7 +378,7 @@ class PollerVoteWritingTest(PollerFeedbackBase):
         self.assertIsNone(v["text"])
         self.assertIsNone(v["score"])
         self.assertIsNone(v["breakdown"])
-        self.assertEqual(self.acks[-1], ("CB", "👍 registrato"))
+        self.assertEqual(self.acks[-1], ("CB", "👍 saved"))
 
     def test_long_key_resolved_via_hash_token(self) -> None:
         key = "bluesky:at://did:plc:" + "q" * 90
@@ -412,7 +412,7 @@ class PollerDedupTest(PollerFeedbackBase):
         # Net state is withdrawn: neither positive nor negative.
         self.assertEqual(poller._current_vote_signal(key), "none")
         self.assertEqual([a[0] for a in self.acks], ["A", "B"])
-        self.assertEqual(self.acks[-1][1], "↩️ voto rimosso")  # toggle-off toast
+        self.assertEqual(self.acks[-1][1], "↩️ vote removed")  # toggle-off toast
 
     def test_third_tap_after_toggle_off_revotes(self) -> None:
         # none -> up: re-voting after a withdrawal logs a fresh active vote (the

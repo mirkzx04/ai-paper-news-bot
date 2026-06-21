@@ -50,13 +50,21 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          USER_ID_SECRET: ${{ secrets.USER_ID_SECRET }}
+          REGISTRY_SECRET: ${{ secrets.REGISTRY_SECRET }}
+          REQUIRE_USER_ID_SECRET: "1"
         run: python main.py --poll-commands -v
 
-      - name: Fetch papers and send digest
+      - name: Fetch papers and send per-user digests
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python main.py --notifier telegram -v
+          USER_ID_SECRET: ${{ secrets.USER_ID_SECRET }}
+          REGISTRY_SECRET: ${{ secrets.REGISTRY_SECRET }}
+          REQUIRE_USER_ID_SECRET: "1"
+        # --all-users fans the digest out to every registered user (each with their
+        # own profile + cadence). Drop the flag to deliver only to the owner chat.
+        run: python main.py --notifier telegram --all-users -v
 
       - name: Save state (data/ -> gist)
         if: always()            # persist even if an earlier step failed

@@ -23,13 +23,16 @@ from datetime import datetime, timezone
 from src import app
 from src.config import apply_profile_overlay, load_config
 from src.env import load_env
+from src.flood_control import SlidingWindowRateLimiter
 from src.flow.profile_flow import ProfileFlow
 from src.report_log import ReportLog
 from src.store.preference_dataset import PreferenceDataset, ProfileListener
 from src.store.profile_store import ProfileStore, UserProfileStoreProvider
 from src.store.sent_items_store import SentItemsStore
 from src.store.sqlite_store import SqliteStore
+from src.store.user_registry import UserRegistry
 from src.telegram_api import set_my_commands
+from src.user_identity import assert_strong_secret
 
 logger = logging.getLogger("serve")
 
@@ -53,19 +56,23 @@ def serve_forever(config_path: str = "config/profile.yaml",
                   db_path: str = "data/bot.db",
                   overlay_path: str = "data/profile_overlay.json",
                   long_poll: int = _LONG_POLL_SECONDS,
-                  max_cycles: int | None = None) -> None:
+                  max_cycles: int | None = None,
+                  all_users: bool = False) -> None:
     """Run the bot as a persistent process until SIGINT/SIGTERM.
 
     ``max_cycles`` bounds the loop (None = forever); it exists only so tests can
-    drive a finite number of cycles without signals.
+    drive a finite number of cycles without signals. ``all_users`` selects the
+    multi-user digest fan-out (deliver to every registered user) instead of the
+    single owner chat.
     """
     load_env()
+    assert_strong_secret()  # warn (dev) / fail (prod) on a weak USER_ID_SECRET
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
     if not token or not chat_id:
         raise app.MissingCredentialsError(
-            "--serve richiede TELEGRAM_BOT_TOKEN e TELEGRAM_CHAT_ID "
-            "(in .env o nell'ambiente). Vedi tools/telegram_setup.py per il chat_id.")
+            "--serve requires TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID "
+            "(in .env or the environment). See tools/telegram_setup.py for the chat_id.")
 
     os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
     store = SqliteStore(db_path)
@@ -77,10 +84,13 @@ def serve_forever(config_path: str = "config/profile.yaml",
     )
     sent_items = SentItemsStore(db_path)
     flow = ProfileFlow(store, profile_store)
+    user_registry = UserRegistry()
+    flood_limiter = SlidingWindowRateLimiter()
     poller = app.build_poller(token, store, profile_store, preference_dataset,
                               admin_chat_id=chat_id, report_log=ReportLog(),
                               sent_items=sent_items, flow=flow,
-                              profile_store_provider=user_profiles)
+                              profile_store_provider=user_profiles,
+                              user_registry=user_registry, flood_limiter=flood_limiter)
 
     _register_menu(token)
 
@@ -106,13 +116,21 @@ def serve_forever(config_path: str = "config/profile.yaml",
             if not running["on"]:
                 break
             # 2) Digest scheduler: re-read the (possibly just-edited) profile, then
-            #    attempt a digest. run_digest_once skips cheaply until it's due.
+            #    attempt a digest. The per-user cadence gate skips cheaply until due.
             try:
-                cfg = apply_profile_overlay(load_config(config_path), profile_store)
-                cfg = replace(cfg, profile=app.enrich_author_ids(cfg.profile))
-                app.run_digest_once(cfg, store, profile_store, preference_dataset,
-                                    notifier_kind="telegram", lookback_override=None,
-                                    dry_run=False, now=datetime.now(timezone.utc))
+                now = datetime.now(timezone.utc)
+                if all_users:
+                    # Multi-user: each user's overlay is applied inside the fan-out,
+                    # so pass the base YAML seed (unmerged).
+                    app.run_digest_for_all(load_config(config_path), store,
+                                           user_registry, preference_dataset, now=now,
+                                           base_overlay_path=overlay_path)
+                else:
+                    cfg = apply_profile_overlay(load_config(config_path), profile_store)
+                    cfg = replace(cfg, profile=app.enrich_author_ids(cfg.profile))
+                    app.run_digest_once(cfg, store, profile_store, preference_dataset,
+                                        notifier_kind="telegram", lookback_override=None,
+                                        dry_run=False, now=now)
             except Exception:  # noqa: BLE001 - already recorded+pushed by run_digest_once
                 logger.exception("digest tick failed")
 

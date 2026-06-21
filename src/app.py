@@ -34,6 +34,8 @@ from src.commands.remove_keywords import RemoveKeywordsCommand
 from src.commands.remove_topic import RemoveTopicCommand
 from src.commands.report import ReportCommand
 from src.commands.set_frequency import SetFrequencyCommand
+from src.config import apply_profile_overlay
+from src.embedding.caching import CachingEmbedder
 from src.embedding.feedback_vectors import load_or_build_feedback_vectors
 from src.embedding.profile_vector import load_or_build
 from src.embedding.specter import SpecterEmbedder
@@ -41,6 +43,7 @@ from src.enrich.semantic_scholar import resolve_author_ids
 from src.error_log import ErrorLog
 from src.notify.base import Notifier
 from src.notify.console_notifier import ConsoleNotifier
+from src.notify.rate_limiter import RateLimiter
 from src.notify.telegram_notifier import TelegramNotifier
 from src.pipeline import Pipeline, RunSummary
 from src.scoring.author_scorer import AuthorScorer
@@ -50,8 +53,11 @@ from src.scoring.field_classifier import FieldClassifier
 from src.scoring.keyword_scorer import KeywordScorer
 from src.sources.arxiv_source import ArxivSource
 from src.store.preference_dataset import PreferenceDataset
+from src.store.profile_store import UserProfileStoreProvider
+from src.store.scoped_seen import ScopedSeenStore
 from src.store.sent_items_store import SentItemsStore
-from src.telegram_api import send_message
+from src.store.user_registry import STATUS_BLOCKED
+from src.telegram_api import PermanentSendError, send_message
 from src.telegram_poller import TelegramPoller
 
 logger = logging.getLogger("app")
@@ -103,11 +109,11 @@ def _heartbeat_text(summary: RunSummary) -> str:
     scoring-error count even when those errors weren't fatal. Pure formatting,
     so it's testable without running the pipeline.
     """
-    capped = (f" (top {summary.digest} di {summary.digest_total})"
+    capped = (f" (top {summary.digest} of {summary.digest_total})"
               if summary.digest_total > summary.digest else "")
     return (
-        f"✅ digest: {summary.alerts} alert + {summary.digest} digest inviati{capped}"
-        f" · {summary.fresh} nuovi · {summary.scoring_errors} scoring-error"
+        f"✅ digest: {summary.alerts} alert + {summary.digest} digest sent{capped}"
+        f" · {summary.fresh} new · {summary.scoring_errors} scoring-error"
     )
 
 
@@ -176,25 +182,31 @@ def build_commands() -> list:
 
 
 def build_notifier(kind: str, field_classifier, *,
-                   sent_items=None, preference_dataset=None, user_id: str | None = None) -> Notifier:
+                   sent_items=None, preference_dataset=None, user_id: str | None = None,
+                   chat_id: str | None = None, rate_limiter=None) -> Notifier:
     """Construct the notifier for ``kind`` ("telegram" or anything else -> console).
 
     Framework-free variant of the original ``main.build_notifier``: instead of
     calling ``parser.error(...)`` when the Telegram credentials are missing, it
     raises ``ValueError`` with the same message so the caller (CLI or serve loop)
-    can translate it to its own idiom. Behaviour is otherwise identical.
+    can translate it to its own idiom.
+
+    ``chat_id`` overrides the delivery target — the per-user digest fan-out passes
+    each user's chat id here; when None we fall back to ``TELEGRAM_CHAT_ID`` (the
+    single-user/owner path, unchanged). ``rate_limiter`` is the shared limiter
+    paced across all per-user notifiers in a run.
     """
     if kind == "telegram":
         token = os.environ.get("TELEGRAM_BOT_TOKEN")
-        chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+        chat_id = chat_id or os.environ.get("TELEGRAM_CHAT_ID")
         if not token or not chat_id:
             raise MissingCredentialsError(
-                "il notifier telegram richiede TELEGRAM_BOT_TOKEN e TELEGRAM_CHAT_ID "
-                "(in .env o nell'ambiente). Vedi tools/telegram_setup.py per il chat_id."
+                "the telegram notifier requires TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID "
+                "(in .env or the environment). See tools/telegram_setup.py for the chat_id."
             )
         return TelegramNotifier(token, chat_id, field_classifier=field_classifier,
                                 sent_items=sent_items, preference_dataset=preference_dataset,
-                                user_id=user_id)
+                                user_id=user_id, rate_limiter=rate_limiter)
     return ConsoleNotifier(field_classifier=field_classifier)
 
 
@@ -202,6 +214,7 @@ def build_pipeline(cfg, store, notifier,
                    profile_vector_path: str = "data/profile_vector.json",
                    preference_dataset=None,
                    user_id: str | None = None,
+                   embedder=None,
                    feedback_vector_path: str = "data/feedback_vectors.json") -> Pipeline:
     arxiv_cfg = cfg.sources.get("arxiv", {})
     sources = [
@@ -214,7 +227,10 @@ def build_pipeline(cfg, store, notifier,
     # The embedder is lazy: load_or_build only downloads/runs SPECTER when there
     # are seed papers and the cached vector is stale. With no seeds the profile
     # vector is None and EmbeddingScorer is a no-op (the model never loads).
-    embedder = SpecterEmbedder()
+    # A shared (caching) embedder can be injected by the per-user fan-out so each
+    # candidate paper is embedded once across all users; default None builds a
+    # fresh SpecterEmbedder (single-user behaviour, unchanged).
+    embedder = embedder if embedder is not None else SpecterEmbedder()
     seed_vector_path = _scoped_user_path(profile_vector_path, user_id)
     seed_vectors = load_or_build(list(cfg.profile.seed_arxiv_ids), embedder, seed_vector_path,
                                  seed_texts=list(cfg.profile.seed_texts))
@@ -277,7 +293,8 @@ def enrich_author_ids(profile, cache_path: str = "data/author_ids.json"):
 
 
 def build_poller(token, store, profile_store, preference_dataset, *,
-                 admin_chat_id, report_log, sent_items, flow, profile_store_provider=None) -> TelegramPoller:
+                 admin_chat_id, report_log, sent_items, flow, profile_store_provider=None,
+                 user_registry=None, flood_limiter=None) -> TelegramPoller:
     """Construct the command poller exactly as the ``--poll-commands`` branch does.
 
     Both entry points share this so the dispatcher/flow/feedback wiring lives in
@@ -291,12 +308,15 @@ def build_poller(token, store, profile_store, preference_dataset, *,
     return TelegramPoller(token, dispatcher, store, flow=flow,
                           error_log=error_log, report_log=report_log,
                           admin_chat_id=admin_chat_id, preference_dataset=preference_dataset,
-                          sent_items=sent_items, profile_store_provider=profile_store_provider)
+                          sent_items=sent_items, profile_store_provider=profile_store_provider,
+                          user_registry=user_registry, flood_limiter=flood_limiter)
 
 
 def run_digest_once(cfg, store, profile_store, preference_dataset, *,
                     notifier_kind, lookback_override, dry_run, now,
-                    user_id: str | None = None) -> RunSummary | None:
+                    user_id: str | None = None, chat_id: str | None = None,
+                    embedder=None, rate_limiter=None,
+                    notify_owner: bool = True) -> RunSummary | None:
     """Run a single digest tick; the shared contract for CLI and serve loop.
 
     Encapsulates exactly the digest branch of ``main.py``:
@@ -326,7 +346,11 @@ def run_digest_once(cfg, store, profile_store, preference_dataset, *,
     # explicit lookback override is a manual run that always sends. We check
     # before building the pipeline so a no-send tick never loads SPECTER.
     manual = lookback_override is not None
-    last_dt = _parse_dt(store.get_meta(_LAST_DIGEST_KEY))
+    # Per-user cadence tracking: each user gets their own last-digest meta key so
+    # one user's send never gates another's. With user_id None this is the
+    # original global key (single-user/owner path, unchanged).
+    last_key = _LAST_DIGEST_KEY if user_id is None else f"{_LAST_DIGEST_KEY}:{user_id}"
+    last_dt = _parse_dt(store.get_meta(last_key))
     if not manual and not _digest_is_due(profile_store.digest_frequency, last_dt, now):
         logger.info("digest skipped: frequency=%s, last=%s",
                     profile_store.digest_frequency, last_dt)
@@ -348,7 +372,7 @@ def run_digest_once(cfg, store, profile_store, preference_dataset, *,
     # `if: always()`. On success we push a one-line heartbeat with the counts.
     # In console mode there is no admin to push to, so behaviour is unchanged.
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    owner_chat_id = os.environ.get("TELEGRAM_CHAT_ID")  # owner heartbeat/alert target
     is_telegram = notifier_kind == "telegram"
     sent_items = None
     try:
@@ -358,16 +382,21 @@ def run_digest_once(cfg, store, profile_store, preference_dataset, *,
         sent_items = SentItemsStore(_store_db_path(store)) if is_telegram else None
         notifier = build_notifier(notifier_kind, field_classifier,
                                   sent_items=sent_items, preference_dataset=preference_dataset,
-                                  user_id=user_id)
+                                  user_id=user_id, chat_id=chat_id, rate_limiter=rate_limiter)
         pipeline = build_pipeline(cfg, store, notifier, preference_dataset=preference_dataset,
-                                  user_id=user_id)
+                                  user_id=user_id, embedder=embedder)
         summary = pipeline.run(since, mark_seen=not dry_run)
         if not dry_run:
-            store.set_meta(_LAST_DIGEST_KEY, now.isoformat())
-        if is_telegram and chat_id:
-            _admin_push(token, chat_id, _heartbeat_text(summary))
+            store.set_meta(last_key, now.isoformat())
+        if notify_owner and is_telegram and owner_chat_id:
+            _admin_push(token, owner_chat_id, _heartbeat_text(summary))
         return summary
     except MissingCredentialsError:
+        raise
+    except PermanentSendError:
+        # The target chat is unreachable (e.g. the user blocked the bot). This is
+        # NOT a run failure and must NOT spam the owner with an error alert — let
+        # it propagate so the fan-out can mark this user blocked in the registry.
         raise
     except Exception as exc:
         ErrorLog().record(
@@ -376,11 +405,78 @@ def run_digest_once(cfg, store, profile_store, preference_dataset, *,
             error=str(exc),
             traceback_str=traceback.format_exc(),
         )
-        if is_telegram and chat_id:
+        if notify_owner and is_telegram and owner_chat_id:
             first_line = (str(exc) or "").splitlines()[0] if str(exc) else ""
-            _admin_push(token, chat_id,
+            _admin_push(token, owner_chat_id,
                         f"⚠️ digest run failed: {type(exc).__name__}: {first_line}")
         raise  # surface to the workflow (failed run + email); state saved by gist step
     finally:
         if sent_items is not None:
             sent_items.close()
+
+
+def run_digest_for_all(cfg, store, registry, preference_dataset, *,
+                       now, base_overlay_path: str = "data/profile_overlay.json",
+                       lookback_override=None, dry_run: bool = False,
+                       notifier_kind: str = "telegram") -> list[tuple[str, RunSummary | None]]:
+    """Run one digest tick for EVERY active registered user (multi-user delivery).
+
+    The keystone of the public release: it loops ``registry.active_users()`` and,
+    for each, runs the same per-user digest as ``run_digest_once`` — that user's
+    profile overlay, feedback vectors, cadence, per-user seen-set, and chat id —
+    while SHARING two expensive resources across the whole run:
+
+      * a caching SPECTER embedder, so each candidate paper is embedded once
+        (not once per user);
+      * a single ``RateLimiter``, so the global ~30 msg/s Telegram cap is honoured
+        across all users, not per-notifier.
+
+    Robustness: each user is wrapped in its own try/except so one user's failure
+    never aborts the run. A ``PermanentSendError`` (the user blocked the bot) marks
+    them ``blocked`` in the registry — they're skipped on subsequent runs. After
+    the loop a single aggregate heartbeat is pushed to the owner (not one per
+    user). Returns ``[(user_id, summary_or_None), ...]`` for observability.
+    """
+    embedder = CachingEmbedder(SpecterEmbedder())
+    rate_limiter = RateLimiter() if notifier_kind == "telegram" else None
+    provider = UserProfileStoreProvider(base_overlay_path)
+    results: list[tuple[str, RunSummary | None]] = []
+    sent = errored = blocked = 0
+
+    for entry in registry.active_users():
+        user_id = entry.get("user_id")
+        chat_id = entry.get("chat_id")
+        if not user_id or chat_id is None:
+            continue
+        try:
+            user_profile_store = provider.for_user(user_id)
+            user_cfg = apply_profile_overlay(cfg, user_profile_store)
+            user_cfg = replace(user_cfg, profile=enrich_author_ids(user_cfg.profile))
+            scoped_store = ScopedSeenStore(store, user_id)
+            summary = run_digest_once(
+                user_cfg, scoped_store, user_profile_store, preference_dataset,
+                notifier_kind=notifier_kind, lookback_override=lookback_override,
+                dry_run=dry_run, now=now, user_id=user_id, chat_id=str(chat_id),
+                embedder=embedder, rate_limiter=rate_limiter, notify_owner=False,
+            )
+            results.append((user_id, summary))
+            if summary is not None:
+                sent += 1
+        except PermanentSendError:
+            registry.set_status(user_id, STATUS_BLOCKED)
+            blocked += 1
+            logger.info("user %s is unreachable (blocked the bot); marked blocked", user_id)
+            results.append((user_id, None))
+        except Exception:  # noqa: BLE001 - one user's failure must not abort the run
+            errored += 1
+            logger.exception("digest failed for user %s", user_id)
+            results.append((user_id, None))
+
+    # One aggregate heartbeat to the owner (telegram mode only).
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    owner_chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if notifier_kind == "telegram" and token and owner_chat_id:
+        _admin_push(token, owner_chat_id,
+                    f"✅ multi-user digest: {sent} sent · {blocked} blocked · "
+                    f"{errored} errored · {registry.count()} known")
+    return results
