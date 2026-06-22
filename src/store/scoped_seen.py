@@ -41,6 +41,10 @@ class ScopedSeenStore(Store):
     def mark_seen(self, key: str, when: datetime) -> None:
         self._base.mark_seen(self._scoped(key), when)
 
+    def mark_seen_many(self, keys: list[str], when: datetime) -> None:
+        # Prefix every key, then let the base store batch them in one transaction.
+        self._base.mark_seen_many([self._scoped(k) for k in keys], when)
+
     def get_meta(self, key: str) -> str | None:
         return self._base.get_meta(key)
 

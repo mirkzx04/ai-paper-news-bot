@@ -12,6 +12,8 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
+from src.atomic_write import atomic_write_text
+
 logger = logging.getLogger(__name__)
 
 
@@ -91,10 +93,9 @@ class ReportLog:
                 record["user_id"] = user_id
             records.append(record)
 
-            # Ensure the parent directory exists before writing.
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            with self.path.open("w", encoding="utf-8") as fh:
-                json.dump(records, fh, indent=2, ensure_ascii=False)
+            # Atomic: rewriting the whole list in place would lose every prior
+            # report if the write were interrupted partway.
+            atomic_write_text(self.path, json.dumps(records, indent=2, ensure_ascii=False))
             return True
         except Exception as exc:  # noqa: BLE001 — must never propagate to the caller.
             logger.error("Failed to write report to %s: %s", self.path, exc)

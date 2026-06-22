@@ -26,6 +26,7 @@ from src.domain.profile import UserProfile  # noqa: E402
 from src.notify.base import ScoredItem  # noqa: E402
 from src.pipeline import Pipeline, RunSummary, Thresholds  # noqa: E402
 from src.scoring.base import ScoreResult  # noqa: E402
+from src.store.base import Store  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #
@@ -65,8 +66,11 @@ class FakeScorer:
         return ScoreResult(total=0.0, breakdown={})
 
 
-class FakeStore:
-    """In-memory seen-set; `filter_unseen` inherited semantics reimplemented."""
+class FakeStore(Store):
+    """In-memory seen-set; `filter_unseen` inherited semantics reimplemented.
+
+    Subclasses Store so it inherits `mark_seen_many` (and any future non-abstract
+    helper) — keeping the fake from drifting behind the real interface."""
 
     def __init__(self, already_seen: set[str] | None = None) -> None:
         self.seen: dict[str, datetime] = {}

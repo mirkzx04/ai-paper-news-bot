@@ -14,6 +14,7 @@ import os
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -40,7 +41,7 @@ class UserRegistryTest(unittest.TestCase):
     def test_chat_id_encrypted_at_rest_and_recoverable(self) -> None:
         reg = UserRegistry(self.path, secret="x" * 40)
         reg.register("u_abc", 987654321)
-        raw = open(self.path, encoding="utf-8").read()
+        raw = Path(self.path).read_text(encoding="utf-8")
         self.assertNotIn("987654321", raw)          # not stored in clear
         self.assertIn("enc:v1:", raw)               # stored as an encrypted blob
         # A registry with the SAME secret recovers it.
@@ -76,7 +77,7 @@ class UserRegistryTest(unittest.TestCase):
         reg.register("u_abc", 424242)
         ds.log({"type": "vote", "user_id": "u_abc", "signal": "up",
                 "canonical_key": "arxiv:1"})
-        body = open(prefs_path, encoding="utf-8").read()
+        body = Path(prefs_path).read_text(encoding="utf-8")
         self.assertIn("u_abc", body)                # anonymous id present
         self.assertNotIn("424242", body)            # raw chat id absent
         record = json.loads(body.splitlines()[0])

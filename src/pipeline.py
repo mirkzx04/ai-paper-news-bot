@@ -99,9 +99,9 @@ class Pipeline:
             # top-N cap: they were scored and consciously deprioritised, not
             # missed, so re-surfacing them next run would just re-litigate the
             # same losing comparison. Alerts and relevant-but-low items are
-            # marked too, exactly as before.
-            for s in scored:
-                self.store.mark_seen(s.item.canonical_key, now)
+            # marked too, exactly as before. One batched write per run, not one
+            # commit per item.
+            self.store.mark_seen_many([s.item.canonical_key for s in scored], now)
 
         return RunSummary(
             fetched=len(raw),

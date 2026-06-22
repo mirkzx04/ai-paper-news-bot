@@ -47,6 +47,8 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
+from src.atomic_write import atomic_write_text
+
 logger = logging.getLogger(__name__)
 
 # Canonical user statuses.
@@ -144,10 +146,10 @@ class UserRegistry:
             self._data = {}
 
     def _save(self) -> None:
+        # Atomic: a torn write would corrupt the encrypted chat-id directory,
+        # which (unlike the vector caches) cannot be recomputed.
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            with self.path.open("w", encoding="utf-8") as fh:
-                json.dump(self._data, fh, ensure_ascii=False, indent=2)
+            atomic_write_text(self.path, json.dumps(self._data, ensure_ascii=False, indent=2))
         except OSError as exc:
             logger.warning("registry: could not write %s: %s", self.path, exc)
 
