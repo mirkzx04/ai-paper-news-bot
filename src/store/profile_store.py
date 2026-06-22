@@ -29,6 +29,8 @@ import os
 from pathlib import Path
 from typing import Callable, Optional
 
+from src.atomic_write import atomic_write_text
+
 logger = logging.getLogger(__name__)
 
 # Observer signature: (action, kind, value) -> None.
@@ -93,9 +95,8 @@ class ProfileStore:
             self._data[key] = loaded[key]
 
     def _save(self) -> None:
-        os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
-        with open(self.path, "w", encoding="utf-8") as fh:
-            json.dump(self._data, fh, ensure_ascii=False, indent=2)
+        # Atomic: a torn write here would lose the user's whole interest profile.
+        atomic_write_text(self.path, json.dumps(self._data, ensure_ascii=False, indent=2))
 
     # ---- accessors (used by the config overlay merge) ----------------------
     @property

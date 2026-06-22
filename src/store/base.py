@@ -19,6 +19,13 @@ class Store(ABC):
     @abstractmethod
     def mark_seen(self, key: str, when: datetime) -> None: ...
 
+    def mark_seen_many(self, keys: list[str], when: datetime) -> None:
+        """Mark several keys seen at once. Default is a loop; SQLite overrides it
+        with a single batched transaction. Backends needn't reimplement to stay
+        correct — only to be fast."""
+        for key in keys:
+            self.mark_seen(key, when)
+
     @abstractmethod
     def get_meta(self, key: str) -> str | None:
         """Read a small key/value (e.g. the Telegram update offset)."""

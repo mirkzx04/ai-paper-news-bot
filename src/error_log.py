@@ -18,6 +18,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
+from src.atomic_write import atomic_write_text
+
 logger = logging.getLogger(__name__)
 _REQUIRED_KEYS = {"timestamp", "command", "error"}
 
@@ -93,14 +95,8 @@ class ErrorLog:
 
     def _write_jsonl_atomic(self, path: Path, records: Iterable[dict]) -> None:
         """Replace ``path`` with JSONL ``records``; used only for legacy migration."""
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(f".{path.name}.tmp")
-        with tmp.open("w", encoding="utf-8") as fh:
-            for record in records:
-                fh.write(json.dumps(record, ensure_ascii=False) + "\n")
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, path)
+        text = "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in records)
+        atomic_write_text(path, text)
 
     def _migrate_current_path_if_legacy_list(self) -> None:
         """Convert a valid JSON-list log at ``self.path`` to JSONL before append."""
